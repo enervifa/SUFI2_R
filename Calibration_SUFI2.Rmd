@@ -41,6 +41,8 @@ E. Repeat up to number iterations (eg. 4)
 Then for multi-variable I need a chuck to add new parameters
 For multi-objective I do not need this, just repeat for 4 iterations 
 
+AI acknowledgment: Github Copilot was used for code generation and refinement. AI assistance was used to generate and optimise code snippets.
+
 ## Select the SUFI2 project to work with 
 
 ```{r setup, include=T, echo = F}
