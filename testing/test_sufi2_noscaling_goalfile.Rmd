@@ -1,0 +1,332 @@
+---
+title: "Test_sufi2"
+author: "Eliana"
+date: "2024-09-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Test SUIF2R algorithms from paper Abbaspour 2007 and Abbaspour 2004 test ust with flow and NSE goal values from "C:\Users\Lenovo\Documents\Calib y Valid La Corona Sydney\LCnewsoil\exorty\LC_newsoil_newdelim.Sufi2.SwatCup\SUFI2.IN\1_all_flow\goal_1_all_flowmetrics.txt"
+
+```{r }
+
+full_path <- "C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/1_all_flow"
+
+## read goal with results of top_row_t_individual_sum, 68% best simulation for the three metrics overlap!!!
+goal_with_OF_indgoal1500 <- read_csv(paste0(full_path,"/1_all_flow_best_sims.csv"))%>%
+  #distinct(Sim_No., .keep_all = TRUE) 
+  filter(metric == 'flow')
+prueba_goal<-goal_with_OF_indgoal1500 
+
+data <-prueba_goal
+
+### CANMX is constant value, thus it is not included in the parameter matrix
+
+params_matrix <- data %>% select(-c(Sim_No.,goal_value,metric,"21:v__CANMX.hru______PINE"))
+
+initial_ranges <-params_matrix%>%
+  pivot_longer(everything(), names_to = "Parameter", values_to = "Value")%>%
+  group_by(Parameter) %>%  
+  summarise(
+    Min = min(Value, na.rm = TRUE),  
+    Max = max(Value, na.rm = TRUE)
+  )
+initial_ranges
+# best_simulations <- data %>%
+#   arrange(desc(goal_value)) %>%
+#   slice(1:ceiling(n() * 0.68))%>%
+#   select(Sim_No.)
+# # data2 <-prueba_goal%>%
+# #   filter(Sim_No. %in% best_simulations$Sim_No.)
+# best_dataplot <- prueba_goal %>%
+#   filter(Sim_No. %in% best_simulations$Sim_No.)
+```
+
+```{r }
+#Sensitivity matrix (Jacobbian) delta NSE/delta parameter for each iteration is computed
+## in this case, flow NSE is used 
+J <- matrix(0, nrow = choose(nrow(params_matrix), 2), ncol = ncol(params_matrix ))
+index <- 1
+for (i in 1:(nrow(data) - 1)) {
+  for (k in (i + 1):nrow(data)) {
+    delta_g <- data$goal_value[k] - data$goal_value[i]
+    params_i <- as.numeric(params_matrix[i, ])
+    params_k <- as.numeric(params_matrix[k, ])
+    delta_b <- params_k - params_i
+    J[index, ] <- delta_g / delta_b
+    index <- index + 1
+  }
+}
+
+## sensitivity matrix (Jacobbian) delta NSE/delta parameter for each iteration is computed
+J[is.na(J)] <- 0
+J_T <- t(J)
+## Hessian matrix, first make sure that terms ar not NA or not finite
+H <- J_T %*% J
+
+#variance of the goal value
+sigma_g2 <- var(data$goal_value)
+
+#Covariance matrix of the parameters multiplied by sigma_g2
+C <- sigma_g2 * solve(H)
+
+#plot C
+### plor covariance results from matrix C
+
+# Convert matrix C to data frame
+C_df <- as.data.frame(C)
+C_df$Parameter1 <- rownames(C_df)
+C_long <- C_df %>%
+  pivot_longer(-Parameter1, names_to = "Parameter2", values_to = "Covariance")
+
+
+#Covariance measures how much two variables change together. 
+#A positive covariance indicates that as one parameter increases, the other parameter tends to increase as well.
+#A negative covariance indicates that as one parameter increases, the other tends to decrease.
+#he magnitude of covariance indicates the strength of the relationship. Larger values (in absolute terms) indicate a stronger relationships
+#Variance: The diagonal elements of the covariance matrix represent the variance of each parameter. Variance measures the spread of each parameter's values around its mean. High variance indicates that the parameter’s values are spread out widely,
+#while low variance indicates that the values are clustered closely around the mean
+#Covariance Between Parameters: Off-diagonal elements show the covariance between pairs of parameters.
+
+ggplot(C_long, aes(x = Parameter1, y = Parameter2, fill = Covariance)) +
+  geom_tile() +
+ # geom_text(aes(label = sprintf("%.2f", Covariance)), color = "white", size = 3) +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "C heatmap",
+       x = "Parameter",
+       y = "Parameter",
+       fill = "Covariance")
+
+
+```
+
+```{r}
+#Standard deviation of the parameters
+s_j <- sqrt(diag(C))
+
+#T-critical value for 95% confidence interval
+t_critical <- qt(0.975, df = nrow(params_matrix ) - ncol(params_matrix ))
+
+#Confidence interval
+
+##First choose either best or median and run code behind
+
+
+best_params <-data %>%
+  arrange(desc(goal_value)) %>%
+  select(-c(Sim_No.,goal_value,metric)) %>% #,metric
+  slice(1)%>%
+  ##select parms for max goal_value
+pivot_longer(everything(), names_to = "Parameter", values_to = "Median")
+
+
+
+#################################
+# Compute Confidence Intervals
+confidence_intervals <- best_params %>%
+  mutate(
+    SD = s_j[match(Parameter, colnames(params_matrix))],  # Match standard deviations to parameters
+    CI_Lower = Median - t_critical * SD,
+    CI_Upper = Median + t_critical * SD
+  )
+
+#  Calculate b'_j min and b'_j max based on the formulas provided
+
+confidence_intervals_final <- confidence_intervals %>%
+filter(Parameter != "21:v__CANMX.hru______PINE") %>% 
+   rowwise() %>%
+   mutate(
+    param_name = Parameter,  # Identify parameter name for each row
+    # Get the min and max from the correct column in params_matrix
+
+    param_min = min(params_matrix[, param_name]),  
+    param_max = max(params_matrix[, param_name]),  
+    b_j_min = CI_Lower - max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2),
+    b_j_max = CI_Upper + max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2)
+  ) %>%
+  ungroup() %>%
+  select(-param_name)%>%  # Remove name
+  select(Parameter, b_j_min, b_j_max)  # Reorder columns)
+
+confidence_intervals_final
+#########
+```
+
+```{r}
+
+# Convert the parameter matrix to a long format for plotting
+params_long <- data %>%
+  select(-c(Sim_No., goal_value,metric)) %>% #,metric
+  pivot_longer(everything(), names_to = "Parameter", values_to = "Value")
+# 
+# # Plot distributions of initial parameters
+# ggplot(params_long, aes(x = Value, fill = Parameter)) +
+#   geom_histogram(position = "dodge", binwidth = 0.5, alpha = 0.7) +
+#  # facet_wrap(~ Parameter, scales = "free") +
+#   theme_minimal() +
+#   labs(title = "Par histogram", x = "Value", y = "Freq") +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+median_params <- data %>%
+  select(-c(Sim_No., goal_value,metric)) %>% #, metric
+  summarise(across(everything(), ~ median(.x, na.rm = TRUE)))%>%
+  pivot_longer(everything(), names_to = "Parameter", values_to = "Median")
+
+#################################
+# Compute Confidence Intervals
+confidence_intervals <- median_params %>%
+  mutate(
+    SD = s_j[match(Parameter, colnames(params_matrix))],  # Match standard deviations to parameters
+    CI_Lower = Median - t_critical * SD,
+    CI_Upper = Median + t_critical * SD
+  )
+
+#  Calculate b'_j min and b'_j max based on the formulas provided
+#The goal is to narrow down the parameter ranges for subsequent rounds to focus on the most promising values.
+#
+confidence_intervals_final <- confidence_intervals %>%
+  filter(Parameter != "21:v__CANMX.hru______PINE") %>% 
+  rowwise() %>%
+  mutate(
+    param_name = Parameter,  # Identify parameter name for each row
+    # Get the min and max from the correct column in params_matrix
+    param_min = min(params_matrix[, param_name]),  
+    param_max = max(params_matrix[, param_name]),  
+    #and the largest b_j_max- b_j_min value  is used for the updated parameter range
+    b_j_min = CI_Lower - max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2),
+    b_j_max = CI_Upper + max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2)
+  ) %>%
+  ungroup() %>%
+  select(-param_name)%>%  # Remove name
+  select(Parameter, b_j_min, b_j_max)  # Reorder columns)
+
+# ## Form Abbasporu 2007, The top p solutions are
+#used to calculate bj,lower and bj,upper
+#The above criteria, while producing narrower parameter
+# ranges for each subsequent iteration, ensure that the updated
+# parameter ranges are always centered on the top p
+# current best estimates, where p is a user defined value.
+confidence_intervals_final
+
+initial_ranges <- params_long %>%
+  group_by(Parameter) %>%
+  summarise(Min = min(Value, na.rm = TRUE),
+            Max = max(Value, na.rm = TRUE))
+# Combine initial ranges with confidence intervals
+combined_data <- confidence_intervals %>%
+  rename(Median = Median, CI_Lower = CI_Lower, CI_Upper = CI_Upper) %>%
+  left_join(initial_ranges, by = c("Parameter" = "Parameter"))%>%
+  left_join(confidence_intervals_final, by = c("Parameter" = "Parameter"))
+
+median<-ggplot(combined_data, aes(x = Parameter)) +
+  geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.2, linetype = "dashed") +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.2) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.2) +
+  geom_point(aes(y = Median, color = "95% CI"), size = 3) +
+  theme_minimal() +
+  theme_bw() +
+  labs(title = "Initial par ranges vs Updated with  CI using Median value",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue"))+ylim(-20,40)
+  median
+
+```
+
+```{r}
+
+# Continue from the covariance matrix (C) computation
+
+# Plot covariance matrix
+library(ggplot2)
+  library(reshape2)
+
+# Convert covariance matrix to long format for plotting
+C_melted <- melt(C, varnames = c("Parameter1", "Parameter2"), value.name = "Covariance")
+
+# Plot heatmap of covariance matrix
+# ggplot(C_melted, aes(x = Parameter1, y = Parameter2, fill = Covariance)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+#   theme_minimal() +
+#   labs(title = "Covariance Matrix Heatmap", x = "Parameter", y = "Parameter")
+
+# Compute correlations using diagonal terms from C
+cor_matrix <- cov2cor(C) #converts a covariance matrix C into a correlation matrix by normalizing the covariance values using the diagonal elements
+# r = Cij/ srqt(Cii)*srqt(Cjj) i is every row and j is every column
+
+#diag_terms <- diag(C)
+# cor_matrix <- sweep(sweep(C, 1, sqrt(diag_terms), FUN = "/"), 2, sqrt(diag_terms), FUN = "/")
+# 
+# # Convert correlation matrix to long format for plotting
+# cor_melted <- melt(cor_matrix, varnames = c("Parameter1", "Parameter2"), value.name = "Correlation")
+# 
+# # Plot heatmap of correlation matrix
+# ggplot(cor_melted, aes(x = Parameter1, y = Parameter2, fill = Correlation)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+#   theme_minimal() +
+#   labs(title = "Correlation Matrix Heatmap", x = "Parameter", y = "Parameter")
+
+# Global sensitivity
+# Fit the multiple regression model
+data_mlr<-data%>%select(-c(Sim_No.,metric))
+
+model <- lm(goal_value ~ ., data = data_mlr)
+
+# Print model summary to view coefficients and significance
+summary(model)
+
+# Extract coefficients and t-values for parameter sensitivities
+coefficients <- summary(model)$coefficients
+
+# Extract the beta values and their p-values
+beta_values <- coefficients[, "Estimate"]
+p_values <- coefficients[, "Pr(>|t|)"]
+
+# Create a data frame for easier visualization
+sensitivity_results <- data.frame(Parameter = rownames(coefficients),
+                                  Beta = beta_values,
+                                  P_value = p_values)
+
+# View the sensitivity results
+sensitivity_results %>%
+  arrange(P_value)
+
+# Filter for significant parameters (e.g., p-value < 0.05)
+significant_params <- sensitivity_results %>%
+  filter(P_value < 0.05)
+
+# View significant parameters
+significant_params
+
+# Plot the sensitivity results
+ggplot(sensitivity_results, aes(x = reorder(Parameter, abs( P_value)), y =  P_value)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip()+ geom_hline(yintercept = c(0.05,0.1), linetype = "dashed", color = "red")+
+  ##legend
+  theme_bw() +
+  labs(title = "Golbal sensitivity analysis MLR",
+       x = "Parameter",
+       y = "P-value") 
+```
+
+```{r}
+#  Calculate Uncertainty Measures
+# Compute the 95% prediction uncertainty (95PPU)
+##Disrtibutions froem LHS can be skewed,Thus, the usual calculation of uncertainty limits as a function of the variance of the predicted values is Step 7 not applicable (Beven and Binley, 1992). 
+#This is done using simulated results from outpu e.g flow data
+
+
+
+```
+

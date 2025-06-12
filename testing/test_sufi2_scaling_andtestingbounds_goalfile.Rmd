@@ -1,0 +1,876 @@
+---
+title: "Untitled"
+author: "Eliana"
+date: "2024-09-18"
+output: html_document
+---
+
+## Test SUFI2 R using scaling step when computing J matrix and calculate covariance. 
+```{r }
+# Function to select either 'best' or 'median', calculate confidence intervals, and parameter bounds
+determine_newrange <- function(data, s_j, params_matrix, initial_ranges, t_critical, choice = "median") {
+  # Select either 'median' or 'best'
+  if (choice == "median") {
+    #browser()
+    # Calculate median values
+    selected_params <- data %>%
+      select(-c(Sim_No., goal_value, "21:v__CANMX.hru______PINE", metric)) %>% 
+      summarise(across(everything(), ~ median(.x, na.rm = TRUE))) %>%
+      pivot_longer(everything(), names_to = "Parameter", values_to = "Median")
+  } else if (choice == "best") {
+    # Select row with the maximum goal_value (best parameters)
+    selected_params <- data %>%
+      arrange(desc(goal_value)) %>%
+      select(-c(Sim_No., goal_value, "21:v__CANMX.hru______PINE", metric)) %>% 
+      slice(1) %>%
+      pivot_longer(everything(), names_to = "Parameter", values_to = "Median")
+  } else {
+    stop("Invalid choice: choose either 'median' or 'best'.")
+  }
+  
+  # Step 2: Compute Confidence Intervals
+  confidence_intervals <- selected_params %>%
+    mutate(
+      SD = s_j[match(Parameter, colnames(params_matrix))],  # Match standard deviations to parameters
+      CI_Lower = Median - t_critical * SD,
+      CI_Upper = Median + t_critical * SD
+    )
+  
+  
+  return(confidence_intervals )
+}
+
+
+######
+# Define the function to calculate parameter bounds 
+calculate_param_bounds <- function(confidence_intervals, goal) { #best_simulations,  params_matrix
+  
+  # Filter the dataset based on best simulations
+  prueba_goal_best_all <- goal# %>%
+    # filter(Sim_No. %in% best_simulations) %>%
+    # distinct(Sim_No., .keep_all = TRUE)
+  
+  # Calculate b'_j min and b'_j max based on the formulas provided
+  confidence_intervals_final <- confidence_intervals %>%
+    rowwise() %>%
+    mutate(
+      param_name = Parameter,  # Identify parameter name for each row
+      
+      # Get the min and max from the correct column in params_matrix
+      param_min = min(prueba_goal_best_all[[param_name]], na.rm = TRUE),  
+      param_max = max(prueba_goal_best_all[[param_name]], na.rm = TRUE),  
+      
+      # Calculate b_j_min and b_j_max based on provided formulas
+      b_j_min = CI_Lower - max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2),
+      b_j_max = CI_Upper + max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2)
+    ) %>%
+    ungroup() %>%
+    select(-param_name) %>%  # Remove param_name
+    #select(Parameter, b_j_min, b_j_max)  # Reorder columns
+  
+  return(confidence_intervals_final)
+}
+
+```
+
+```{r }
+####################test ust with flow NSEs "C:\Users\Lenovo\Documents\Calib y Valid La Corona Sydney\LCnewsoil\exorty\LC_newsoil_newdelim.Sufi2.SwatCup\SUFI2.IN\1_all_flow\goal_1_all_flowmetrics.txt"
+
+# ######## as I am working with LAI, I will calculate covariance for flow, and then include other metrics in the best param range
+## only best simulations overlap 68%
+goal_with_OF_indgoal1500 <- read_table2(paste0(full_path,"/goal_1_all_flow1500.txt"),
+                skip=3, col_names=T)%>%
+  filter(metric =='flow')
+
+prueba_goal<- read_csv("Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/1_all_flow/1_all_flow_best_sims.csv")
+
+
+# prueba_goal_best<-goal_with_OF_indgoal1500%>%
+#   filter(Sim_No. %in% best_simulations)%>%
+#   #distinct(Sim_No., .keep_all = TRUE) 
+#   filter(metric == 'flow')
+# 
+prueba_goal<-prueba_goal%>%
+  filter(metric == 'flow') ## this is just to use NSE for flowin Jacobbian
+# Calculate the percentile 50 of goal_value
+# Filter the dataset to keep only the top 10% of simulations based on goal_value
+##ned to comment ot uncomment in later ET and LAI
+prueba_goal_top_10 <- prueba_goal %>%
+  arrange(desc(goal_value)) %>%
+  slice(1:round(nrow(prueba_goal) * 0.5))
+
+prueba_goal<-prueba_goal_top_10
+
+data <-prueba_goal
+params_matrix <- data %>% select(-c(Sim_No.,goal_value,metric,"21:v__CANMX.hru______PINE"))
+initial_ranges <-params_matrix%>%
+  pivot_longer(everything(), names_to = "Parameter", values_to = "Value")%>%
+  group_by(Parameter) %>%  
+  summarise(
+    Min = min(Value, na.rm = TRUE),  
+    Max = max(Value, na.rm = TRUE)
+  )
+
+# # Define a function for min-max scaling
+# min_max_scaling <- function(x) {
+#   (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+# }
+
+# # If we apply min-max scaling to the parameters in params_matrix
+# params_matrix_scaled <- params_matrix %>%
+#   mutate(across(everything(), min_max_scaling))
+
+# # Z-Score standarization function?
+# z_score_scaling <- function(x) {
+#   (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+# }
+
+# Apply Z-Score Scaling to the parameters in params_matrix
+params_matrix_scaled <- params_matrix %>%
+  mutate(across(everything(), z_score_scaling))
+
+# Use the scaled parameters for the rest of the analysis
+params_matrix<-params_matrix_scaled
+
+best_data<-data
+
+J <- matrix(0, nrow = choose(nrow(params_matrix), 2), ncol = ncol(params_matrix ))
+index <- 1
+for (i in 1:(nrow(best_data) - 1)) {
+  for (k in (i + 1):nrow(best_data)) {
+    delta_g <- data$goal_value[k] - data$goal_value[i]
+    params_i <- as.numeric(params_matrix[i, ])
+    params_k <- as.numeric(params_matrix [k, ])
+    delta_b <- params_k - params_i
+    J[index, ] <- delta_g / delta_b
+    index <- index + 1
+  }
+}
+
+J[is.na(J)] <- 0
+J_T <- t(J)
+H <- J_T %*% J
+sigma_g2 <- var(data$goal_value)
+C <- sigma_g2 * solve(H)
+
+
+s_j <- sqrt(diag(C))
+t_critical <- qt(0.975, df = nrow(best_data) - ncol(best_data))
+
+
+combined_data_median <- determine_newrange (
+  data = best_data, 
+  s_j = s_j, 
+  params_matrix = params_matrix, 
+  initial_ranges = initial_ranges, 
+  t_critical = t_critical, 
+  choice = "median"  # Can switch to 'best' for best parameters
+)
+
+combined_data_best <- determine_newrange(
+  data = best_data, 
+  s_j = s_j, 
+  params_matrix = params_matrix, 
+  initial_ranges = initial_ranges, 
+  t_critical = t_critical, 
+  choice = "best"  # Switch to 'best' for best parameters
+)
+
+combined_data_flow <- bind_rows(
+  combined_data_median %>% mutate(center = 'median'),
+  combined_data_best %>% mutate(center = 'best sim')
+) %>%
+  mutate(metric = 'flow')
+
+# 
+# ### calculate param_min  and param_max from 
+# prueba_goal_best_all<-goal_with_OF_indgoal1500%>%
+#   filter(Sim_No. %in% best_simulations)%>%
+#   distinct(Sim_No., .keep_all = TRUE) 
+# 
+# # Step 3: Calculate b'_j min and b'_j max based on the formulas provided
+# confidence_intervals_final <- confidence_intervals %>%
+#   rowwise() %>%
+#   mutate(
+#     param_name = Parameter,  # Identify parameter name for each row
+#     
+#     # Get the min and max from the correct column in params_matrix
+#     param_min = min(params_matrix[[param_name]], na.rm = TRUE),  
+#     param_max = max(params_matrix[[param_name]], na.rm = TRUE),  
+#     
+#     # Calculate b_j_min and b_j_max based on provided formulas
+#     b_j_min = CI_Lower - max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2),
+#     b_j_max = CI_Upper + max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2)
+#   ) %>%
+#   ungroup() %>%
+#   select(-param_name) %>%  # Remove param_name
+#   select(Parameter, b_j_min, b_j_max)  # Reorder columns
+combined_data_flow 
+```
+
+
+```{r }
+
+## calculate final bands and divide parametersd in categories to plot and analyse
+
+
+confidence_intervals_final <- calculate_param_bounds(
+  confidence_intervals =combined_data_median , 
+  goal = goal_with_OF_indgoal1500%>%
+    filter(metric == 'flow')
+)%>%
+  mutate(category = case_when(
+    param_max < 1 ~ "one",
+    param_max < 5 ~ "two",
+    param_max < 100 ~ "three",
+    TRUE ~ "High"
+  ))
+
+confidence_intervals_final_all <- calculate_param_bounds(
+  confidence_intervals = combined_data_median ,
+  goal= prueba_goal
+)%>%
+  mutate(category = case_when(
+    param_max < 1 ~ "one",
+    param_max < 5 ~ "two",
+    param_max < 100 ~ "three",
+    TRUE ~ "High"
+  ))
+
+
+### compaoi
+###plot results confidence_intervals_final_all  and confidence_intervals_final
+combined_confidence_intervals_flow <- bind_rows(
+  confidence_intervals_final_all %>%
+    mutate(Source = 'All Goals'),
+  confidence_intervals_final %>%
+    mutate(Source = 'Filtered by Flow')
+)%>%
+  #showrt parameter name
+    mutate(Parameter = str_remove(Parameter, "^.*?__"))%>%
+  mutate(metric = 'flow')
+
+
+
+c1<-ggplot(combined_confidence_intervals_flow %>%
+             filter(category == 'one'), aes(x = Parameter)) +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = Source), width = 0.2, position = position_dodge(width = 0.5)) +
+  geom_point(aes(y = CI_Lower, color = Source), size = 3, shape = 21, fill = "white") +
+  geom_point(aes(y = CI_Upper, color = Source), size = 3, shape = 21, fill = "white") +
+  labs(title = "Confidence Intervals for Parameters",
+       x = "Parameter",
+       y = "Value",
+       color = "Source") +
+  #facet_wrap(category ~ ., scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+c2<-ggplot(combined_confidence_intervals_flow %>%
+             filter(category == 'two'), aes(x = Parameter)) +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = Source), width = 0.2, position = position_dodge(width = 0.5)) +
+  geom_point(aes(y = CI_Lower, color = Source), size = 3, shape = 21, fill = "white") +
+  geom_point(aes(y = CI_Upper, color = Source), size = 3, shape = 21, fill = "white") +
+  labs(title = "Confidence Intervals for Parameters",
+       x = "Parameter",
+       y = "Value",
+       color = "Source") +
+  facet_wrap(category ~ ., scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+
+c3<-ggplot(combined_confidence_intervals_flow %>%
+             filter(category == 'three'), aes(x = Parameter)) +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = Source), width = 0.2, position = position_dodge(width = 0.5)) +
+  geom_point(aes(y = CI_Lower, color = Source), size = 3, shape = 21, fill = "white") +
+  geom_point(aes(y = CI_Upper, color = Source), size = 3, shape = 21, fill = "white") +
+  labs(title = "Confidence Intervals for Parameters",
+       x = "Parameter",
+       y = "Value",
+       color = "Source") +
+  facet_wrap(category ~ ., scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+
+ch<-ggplot(combined_confidence_intervals_flow%>%
+             filter(category == 'High'), aes(x = Parameter)) +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = Source), width = 0.2, position = position_dodge(width = 0.5)) +
+  geom_point(aes(y = CI_Lower, color = Source), size = 3, shape = 21, fill = "white") +
+  geom_point(aes(y = CI_Upper, color = Source), size = 3, shape = 21, fill = "white") +
+  labs(title = "Confidence Intervals for Parameters",
+       x = "Parameter",
+       y = "Value",
+       color = "Source") +
+  facet_wrap(category ~ ., scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+library(gridExtra)
+grid.arrange(c1,c2, ncol = 1)
+```
+
+##Plor covariance matrix
+```{r pressure, echo=FALSE}
+
+# Convert matrix C to data frame
+C_df <- as.data.frame(C)
+C_df$Parameter1 <- rownames(C_df)
+C_long <- C_df %>%
+  pivot_longer(-Parameter1, names_to = "Parameter2", values_to = "Covariance")
+
+# Create the heatmap
+FlowC<-ggplot(C_long, aes(x = Parameter1, y = Parameter2, fill = Covariance)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  labs(title = "Covariance Matrix Heatmap flow",
+       x = "Parameter",
+       y = "Parameter",
+       fill = "Covariance")
+FlowC
+```
+### All same bit with LAI NSEs
+```{r }
+# ######## as I am working with LAI, I will calculate covariance for flow, and then include other metrics in the best param range
+
+####################test ust with LAI NSEs
+## only best simulations overlap 68%
+goal_with_OF_indgoal1500 <- read_table2(paste0(full_path,"/goal_1_all_flow1500.txt"),
+                skip=3, col_names=T)%>%
+  filter(metric =='LAI')
+
+prueba_goal<- read_csv("Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/1_all_flow/1_all_flow_best_sims.csv")
+
+# prueba_goal_best<-goal_with_OF_indgoal1500%>%
+#   filter(Sim_No. %in% best_simulations)%>%
+#   #distinct(Sim_No., .keep_all = TRUE) 
+#   filter(metric == 'flow')
+
+prueba_goal<-prueba_goal%>%
+  filter(metric == 'LAI')
+
+# Calculate the percentile 90 of goal_value
+# Filter the dataset to keep only the top 10% of simulations based on goal_value
+prueba_goal_top_10 <- prueba_goal %>%
+  arrange(desc(goal_value)) %>%
+  slice(1:round(nrow(prueba_goal) * 0.5))
+
+prueba_goal<-prueba_goal_top_10
+
+
+
+data <-prueba_goal
+params_matrix <- data %>% select(-c(Sim_No.,goal_value,metric,"21:v__CANMX.hru______PINE"))
+
+initial_ranges <-params_matrix%>%
+  pivot_longer(everything(), names_to = "Parameter", values_to = "Value")%>%
+  group_by(Parameter) %>%  
+  summarise(
+    Min = min(Value, na.rm = TRUE),  
+    Max = max(Value, na.rm = TRUE)
+  )
+best_data<-data
+
+# Apply Z-Score Scaling to the parameters in params_matrix
+params_matrix_scaled <- params_matrix %>%
+  mutate(across(everything(), z_score_scaling))
+
+# Use the scaled parameters for the rest of the analysis
+params_matrix<-params_matrix_scaled
+
+
+J <- matrix(0, nrow = choose(nrow(params_matrix), 2), ncol = ncol(params_matrix ))
+index <- 1
+for (i in 1:(nrow(best_data) - 1)) {
+  for (k in (i + 1):nrow(best_data)) {
+    delta_g <- data$goal_value[k] - data$goal_value[i]
+    params_i <- as.numeric(params_matrix[i, ])
+    params_k <- as.numeric(params_matrix[k, ])
+    delta_b <- params_k - params_i
+    J[index, ] <- delta_g / delta_b
+    index <- index + 1
+  }
+}
+
+J[is.na(J)] <- 0
+J[!is.finite(J)] <- 0 
+J_T <- t(J)
+H <- J_T %*% J
+
+data$goal_value[is.infinite(data$goal_value)] <- NA
+sigma_g2 <- var(na.omit(data$goal_value))
+
+C <- sigma_g2 * solve(H)
+
+
+s_j <- sqrt(diag(C))
+t_critical <- qt(0.975, df = nrow(best_data) - ncol(best_data)) ### not less rows than columns!!
+
+combined_data_median <- determine_newrange (
+  data = best_data, 
+  s_j = s_j, 
+  params_matrix = params_matrix, 
+  initial_ranges = initial_ranges, 
+  t_critical = t_critical, 
+  choice = "median"  # Can switch to 'best' for best parameters
+)
+
+combined_data_best <- determine_newrange(
+  data = best_data, 
+  s_j = s_j, 
+  params_matrix = params_matrix, 
+  initial_ranges = initial_ranges, 
+  t_critical = t_critical, 
+  choice = "best"  # Switch to 'best' for best parameters
+)
+
+combined_data_lai <- bind_rows(
+  combined_data_median %>% mutate(center = 'median'),
+  combined_data_best %>% mutate(center = 'best sim')
+) %>%
+  mutate(metric = 'LAI')
+
+## calculate final bands and divide parametersd in categories to plot and analyse
+
+
+confidence_intervals_final <- calculate_param_bounds(
+  confidence_intervals = combined_data_median , 
+  goal = goal_with_OF_indgoal1500%>%
+    filter(metric == 'LAI')
+)%>%
+  mutate(category = case_when(
+    param_max < 1 ~ "one",
+    param_max < 5 ~ "two",
+    param_max < 100 ~ "three",
+    TRUE ~ "High"
+  ))
+
+confidence_intervals_final_all <- calculate_param_bounds(
+  confidence_intervals = combined_data_median ,
+  goal= prueba_goal
+)%>%
+  mutate(category = case_when(
+    param_max < 1 ~ "one",
+    param_max < 5 ~ "two",
+    param_max < 100 ~ "three",
+    TRUE ~ "High"
+  ))
+
+
+### compaoi
+###plot results confidence_intervals_final_all  and confidence_intervals_final
+combined_confidence_intervals_lai <- bind_rows(
+  confidence_intervals_final_all %>%
+    mutate(Source = 'All Goals'),
+  confidence_intervals_final %>%
+    mutate(Source = 'Filtered by Flow')
+)%>%
+  #showrt parameter name
+    mutate(Parameter = str_remove(Parameter, "^.*?__"))%>%
+  mutate(metric = 'LAI')
+
+
+### plor covariance results from matrix C
+
+# Convert matrix C to data frame
+C_df <- as.data.frame(C)
+C_df$Parameter1 <- rownames(C_df)
+C_long <- C_df %>%
+  pivot_longer(-Parameter1, names_to = "Parameter2", values_to = "Covariance")
+
+# Create the heatmap
+LAIC<-ggplot(C_long, aes(x = Parameter1, y = Parameter2, fill = Covariance)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  labs(title = "Covariance Matrix Heatmap LAI",
+       x = "Parameter",
+       y = "Parameter",
+       fill = "Covariance")
+
+#Covariance measures how much two variables change together. 
+#A positive covariance indicates that as one parameter increases, the other parameter tends to increase as well.
+#A negative covariance indicates that as one parameter increases, the other tends to decrease.
+#he magnitude of covariance indicates the strength of the relationship. Larger values (in absolute terms) indicate a stronger relationships
+#Variance: The diagonal elements of the covariance matrix represent the variance of each parameter. Variance measures the spread of each parameter's values around its mean. High variance indicates that the parameter’s values are spread out widely,
+#while low variance indicates that the values are clustered closely around the mean
+
+# 
+# ggplot(combined_data_flow_lai_et, aes(x = Parameter, y = SD, fill = metric)) +
+#   geom_bar(stat = "identity", position = "dodge", width = 0.7) +  # Bar plot with SD values
+#   theme_bw() +
+#   labs(title = "Standard Deviation from  sqrt(diag(C)) for each Metric",
+#        x = "Metric",
+#        y = "Standard Deviation (SD)",
+#        fill = "Metric") +
+#   facet_wrap(~ category, scales = "free") +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels for readability
+
+LAIC
+```
+```{r }
+####################test ust with ET NSE
+## only best simulations overlap 68%
+goal_with_OF_indgoal1500 <- read_table2(paste0(full_path,"/goal_1_all_flow1500.txt"),
+                skip=3, col_names=T)%>%
+  filter(metric =='ET')
+
+prueba_goal<- read_csv("Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/1_all_flow/1_all_flow_best_sims.csv")
+
+# prueba_goal_best<-goal_with_OF_indgoal1500%>%
+#   filter(Sim_No. %in% best_simulations)%>%
+#   #distinct(Sim_No., .keep_all = TRUE) 
+#   filter(metric == 'flow')
+# 
+prueba_goal<-prueba_goal%>%
+  filter(metric == 'ET')
+
+# Calculate the percentile 90 of goal_value
+# Filter the dataset to keep only the top 10% of simulations based on goal_value
+prueba_goal_top_10 <- prueba_goal %>%
+  arrange(desc(goal_value)) %>%
+  slice(1:round(nrow(prueba_goal) * 0.5))
+
+prueba_goal<-prueba_goal_top_10
+
+
+data <-prueba_goal
+params_matrix <- data %>% select(-c(Sim_No.,goal_value,metric,"21:v__CANMX.hru______PINE"))
+initial_ranges <-params_matrix%>%
+  pivot_longer(everything(), names_to = "Parameter", values_to = "Value")%>%
+  group_by(Parameter) %>%  
+  summarise(
+    Min = min(Value, na.rm = TRUE),  
+    Max = max(Value, na.rm = TRUE)
+  )
+best_data<-data
+
+# Apply Z-Score Scaling to the parameters in params_matrix
+params_matrix_scaled <- params_matrix %>%
+  mutate(across(everything(), z_score_scaling))
+
+# Use the scaled parameters for the rest of the analysis
+params_matrix<-params_matrix_scaled
+
+J <- matrix(0, nrow = choose(nrow(params_matrix), 2), ncol = ncol(params_matrix ))
+index <- 1
+for (i in 1:(nrow(best_data) - 1)) {
+  for (k in (i + 1):nrow(best_data)) {
+    delta_g <- data$goal_value[k] - data$goal_value[i]
+    params_i <- as.numeric(params_matrix[i, ])
+    params_k <- as.numeric(params_matrix[k, ])
+    delta_b <- params_k - params_i
+    J[index, ] <- delta_g / delta_b
+    index <- index + 1
+  }
+}
+
+J[is.na(J)] <- 0
+J[!is.finite(J)] <- 0 
+J_T <- t(J)
+H <- J_T %*% J
+
+#data$goal_value[is.infinite(data$goal_value)] <- NA
+sigma_g2 <- var(na.omit(data$goal_value))
+
+C <- sigma_g2 * solve(H)
+
+
+s_j <- sqrt(diag(C))
+t_critical <- qt(0.975, df = nrow(best_data) - ncol(best_data))
+
+combined_data_median <- determine_newrange (
+  data = best_data, 
+  s_j = s_j, 
+  params_matrix = params_matrix, 
+  initial_ranges = initial_ranges, 
+  t_critical = t_critical, 
+  choice = "median"  # Can switch to 'best' for best parameters
+)
+
+combined_data_best <- determine_newrange(
+  data = best_data, 
+  s_j = s_j, 
+  params_matrix = params_matrix, 
+  initial_ranges = initial_ranges, 
+  t_critical = t_critical, 
+  choice = "best"  # Switch to 'best' for best parameters
+)
+
+combined_data_et <- bind_rows(
+  combined_data_median %>% mutate(center = 'median'),
+  combined_data_best %>% mutate(center = 'best sim')
+) %>%
+  bind_rows(params_matrix)%>% 
+  mutate(metric = 'ET')
+
+
+## calculate final bands using MEDIAN approach, and divide parametersd in categories to plot and analyse
+
+
+confidence_intervals_final <- calculate_param_bounds(
+  confidence_intervals =combined_data_median , 
+  goal = goal_with_OF_indgoal1500%>%
+    filter(metric == 'ET')
+)%>%
+  mutate(category = case_when(
+    param_max < 1 ~ "one",
+    param_max < 5 ~ "two",
+    param_max < 100 ~ "three",
+    TRUE ~ "High"
+  ))
+
+confidence_intervals_final_all <- calculate_param_bounds(
+  confidence_intervals = combined_data_median ,
+  goal= prueba_goal
+)%>%
+  mutate(category = case_when(
+    param_max < 1 ~ "one",
+    param_max < 5 ~ "two",
+    param_max < 100 ~ "three",
+    TRUE ~ "High"
+  ))
+
+##testing
+max_min_values1 <- prueba_goal %>%
+  summarise(across(where(is.numeric), ~ list(min = min(.x, na.rm = TRUE), max = max(.x, na.rm = TRUE)))) %>%
+  tidyr::unnest(cols = everything())
+max_min_values2 <- goal_with_OF_indgoal1500%>%
+  summarise(across(where(is.numeric), ~ list(min = min(.x, na.rm = TRUE), max = max(.x, na.rm = TRUE)))) %>%
+  tidyr::unnest(cols = everything())
+
+
+### compaoi
+###plot results confidence_intervals_final_all  and confidence_intervals_final
+combined_confidence_intervals_ET <- bind_rows(
+  confidence_intervals_final_all %>%
+    mutate(Source = 'All Goals'),
+  confidence_intervals_final %>%
+    mutate(Source = 'Filtered by Flow')
+)%>%
+  #showrt parameter name
+    mutate(Parameter = str_remove(Parameter, "^.*?__"))%>%
+  mutate(metric = 'ET')
+  
+
+
+
+### plor covariance results from matrix C
+
+# Convert matrix C to data frame
+C_df <- as.data.frame(C)
+C_df$Parameter1 <- rownames(C_df)
+C_long <- C_df %>%
+  pivot_longer(-Parameter1, names_to = "Parameter2", values_to = "Covariance")
+
+# Create the heatmap
+ETC<-ggplot(C_long, aes(x = Parameter1, y = Parameter2, fill = Covariance)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  labs(title = "Covariance Matrix Heatmap ET",
+       x = "Parameter",
+       y = "Parameter",
+       fill = "Covariance")
+ETC
+```
+
+
+```{r }
+
+
+############## combine and plot results
+
+### plot all ranges 
+combined_data_flow_lai_et<-bind_rows(combined_confidence_intervals_flow,combined_confidence_intervals_lai,combined_confidence_intervals_ET)%>%
+# Divide parameters into categories based on their maximum value
+
+  group_by(Parameter)%>%
+  mutate(category = case_when(
+    max(param_max ) <= 1 ~ "one",
+    max(param_max ) <= 5 ~ "two",
+    max(param_max ) <= 100 ~ "three",
+    TRUE ~ "High"
+  )) %>%
+  ungroup()
+# Modify x-axis labels to appear twice
+combined_data_flow_lai_et_plot<- combined_data_flow_lai_et %>%
+  mutate(Parameter_Label = factor(paste(Parameter, metric, sep = " - ")))
+
+# Plot with customized x-axis labels
+c_one <- ggplot(combined_data_flow_lai_et_plot %>% filter(category  == "one",Source== "All Goals"), aes(x = Parameter_Label)) +
+  geom_errorbar(aes(ymin = param_min, ymax =param_max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+  geom_point(aes(y = Median, color = as.factor(metric)), size = 2, alpha=0.2) +
+  theme_minimal() +
+  theme_bw() +
+  #  facet_grid(metric ~ ., scales = "fixed") +
+  labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using Median and All goals for new range",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue")) #+
+#scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+
+c_one
+
+
+# Plot with customized x-axis labels
+c_one_best <- ggplot(combined_data_flow_lai_et_plot %>% filter(category  == "one",Source== "Filtered by Flow"), aes(x = Parameter_Label)) +
+  geom_errorbar(aes(ymin = param_min, ymax =param_max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+  geom_point(aes(y = Median, color = as.factor(metric)), size = 2, alpha=0.2) +
+  theme_minimal() +
+  theme_bw() +
+  #  facet_grid(metric ~ ., scales = "fixed") +
+  labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using Median and best sim overlap only goals for new range",
+       x = NULL,
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue")) +
+  xlab(NULL) 
+  
+c_one/c_one_best
+
+# # Plot with customized x-axis labels
+# c_two <- ggplot(combined_data_flow_lai_et_plot %>% filter(category == "two",cenetr == "best sim"), aes(x = Parameter_Label)) +
+#   geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+#   geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+#   geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+#   geom_point(aes(y = Median, color = cenetr), size = 2, alpha=0.2) +
+#   theme_minimal() +
+#   theme_bw() +
+#  # facet_grid(categ ~ ., scales = "free") +
+#   labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using Best",
+#        x = "Parameter",
+#        y = "Value") +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue", "best sim" = "black", "median" = "orange")) +
+#   scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+# 
+# c_two
+# 
+# c_three <- ggplot(combined_data_flow_lai_et_plot %>% filter(category == "three",cenetr == "best sim"), aes(x = Parameter_Label)) +
+#   geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+#   geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+#   geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+#   geom_point(aes(y = Median, color = cenetr), size = 2, alpha=0.2) +
+#   theme_minimal() +
+#   theme_bw() +
+#  # facet_grid(categ ~ ., scales = "free") +
+#   labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using Best",
+#        x = "Parameter",
+#        y = "Value") +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue", "best sim" = "black", "median" = "orange")) +
+#   scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+# 
+# c_three
+# 
+# 
+# c_high <- ggplot(combined_data_flow_lai_et_plot %>% filter(category == "High",cenetr == "best sim"), aes(x = Parameter_Label)) +
+#   geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+#   geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+#   geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+#   geom_point(aes(y = Median, color = cenetr), size = 2, alpha=0.2) +
+#   theme_minimal() +
+#   theme_bw() +
+#   # facet_grid(categ ~ ., scales = "free") +
+#   labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using Best",
+#        x = "Parameter",
+#        y = "Value") +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue", "best sim" = "black", "median" = "orange")) +
+#   scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+# 
+# c_high
+# 
+# 
+# library(gridExtra)
+# grid.arrange(c_one,c_two,c_three,c_high, ncol = 1)
+
+
+## Few change on ranges, we can justify that 68% is too much simulations considenring top. We migth go with another approach for this, maybe top percentile 90, 10% only
+#percentile_threshold <- quantile(prueba_goal$performance_metric, probs = 0.90, na.rm = TRUE)
+
+```
+
+
+
+```{r }
+####################median
+
+# Plot with customized x-axis labels
+c_one <- ggplot(combined_data_flow_lai_et_plot %>% filter(category  == "one",cenetr == "median"), aes(x = Parameter_Label)) +
+  geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+  geom_point(aes(y = Median, color = as.factor(metric)), size = 2, alpha=0.2) +
+  theme_minimal() +
+  theme_bw() +
+  #  facet_grid(metric ~ ., scales = "fixed") +
+  labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using median",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue")) #+
+#scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+
+c_one
+# Plot with customized x-axis labels
+c_two <- ggplot(combined_data_flow_lai_et_plot %>% filter(category == "two",cenetr == "median"), aes(x = Parameter_Label)) +
+  geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+  geom_point(aes(y = Median, color = cenetr), size = 2, alpha=0.2) +
+  theme_minimal() +
+  theme_bw() +
+  # facet_grid(categ ~ ., scales = "free") +
+  labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using median",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue", "median" = "black", "median" = "orange")) +
+  scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+
+c_two
+
+c_three <- ggplot(combined_data_flow_lai_et_plot %>% filter(category == "three",cenetr == "median"), aes(x = Parameter_Label)) +
+  geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+  geom_point(aes(y = Median, color = cenetr), size = 2, alpha=0.2) +
+  theme_minimal() +
+  theme_bw() +
+  # facet_grid(categ ~ ., scales = "free") +
+  labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using median",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue", "median" = "black", "median" = "orange")) +
+  scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+
+c_three
+
+
+c_high <- ggplot(combined_data_flow_lai_et_plot %>% filter(category == "High",cenetr == "median"), aes(x = Parameter_Label)) +
+  geom_errorbar(aes(ymin = Min, ymax = Max, color = "Initial Range"), width = 0.1, linetype = "dashed") +
+  geom_errorbar(aes(ymin = b_j_min, ymax = b_j_max, color = "Updated Range"), width = 0.1) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper, color = "95% CI"), width = 0.4) +
+  geom_point(aes(y = Median, color = cenetr), size = 2, alpha=0.2) +
+  theme_minimal() +
+  theme_bw() +
+  # facet_grid(categ ~ ., scales = "free") +
+  labs(title = "Initial Parameter Ranges vs Updated Parameters with Confidence Intervals using median",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_color_manual(values = c("Initial Range" = "red", "Updated Range" = "green", "95% CI" = "blue", "median" = "black", "median" = "orange")) +
+  scale_x_discrete(labels = function(x) gsub(" - ", "\n", x))  # Customize x-axis labels
+
+c_high
+
+```
