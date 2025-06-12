@@ -1,0 +1,787 @@
+---
+title: "Untitled"
+author: "Eliana"
+date: "2024-09-04"
+output: html_document
+---
+
+##########
+
+
+After having combined_performance_all I will do a sensitivity analysis using MLR.
+
+## Select the SUFI2 project to work with 
+```{r setup, include=T, echo = F}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "")
+require(tidyverse)
+require(lubridate)
+library(readr)
+library(purrr)
+library(readxl)
+library(lhs)
+library(purrr)
+
+#upload functions
+source<-"C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/Sensit500_epcoescofreegsifixed"
+source(paste0( source,"/Fun7_OF_calc.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun6_OF_eval.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun5_perform_fun.R"), local = knitr::knit_global())
+source(paste0(source,"/Fun4_OutpuExtract_LAI.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun3_OutpuExtract_ET.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun2_OutpuExtract_reach.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun1_LHS.R"), local = knitr::knit_global())
+  
+##upload observed data
+et_df2 <- readRDS(file = "C:/Users/Lenovo/Desktop/LC_subbasins/ET_newdel/process data/processed_files_name.RDS")
+et_df3<-et_df2
+
+flow_11 <- read_excel("C:/Users/Lenovo/Desktop/LC_subbasins/Flow_lc_OK/flow_14ok.xlsx")
+flow_12 <- read_excel("C:/Users/Lenovo/Desktop/LC_subbasins/Flow_lc_OK/flow_15ok.xlsx")
+
+### list files flow_14 and flow_15
+flow_df <- list(flow_11, flow_12)
+#id names to "FLOW_OUT_14" AND "FLOW_OUT_15"
+names(flow_df) <- c("FLOW_OUT_11", "FLOW_OUT_12") #string identifier in observed.txt in FLOW_OUT_14 and FLOW_OUT_15
+
+### add Date column grep month as number after FLOW_OUT_ and up to _ and year after _ and up to end of the string in name column
+##first mutate to find month and year
+
+# Assuming you have a list of data frames named data_frames_list
+flow_df_date <- map(flow_df, ~ mutate(.x,
+                                                  month = as.integer(sub("FLOW_OUT_([0-9]+)_([0-9]+)", "\\1", name)),
+                                                  year = as.integer(sub("FLOW_OUT_([0-9]+)_([0-9]+)", "\\2", name))))
+flow_df_date2 <- map(flow_df_date , ~ mutate(.x, Date = make_date(year=year, month=month)))%>%
+  map(~select(.x, Date, flow))
+
+
+LAI_obs <- readRDS(file = "C:/Users/Lenovo/Desktop/LC_subbasins/LAIHIQ_data_newdel/processed_data.rds") ## new LAI HIQ data and new delineation subbasins 08282024
+## ungroup to make sure the list is not grouped and prevent Adding missing grouping variables: `month`
+LAI_df <- map(LAI_obs, ~ungroup(.x))
+
+LAI_df3 <- LAI_df %>%
+  map(~.x[-1,]) %>%
+  map(~mutate(.x, Date = make_date(year=year, month=month))) %>%
+  map(~rename(.x, monthly_mean_LAI =  monthly_mean )) %>%
+  map(~select(.x, Date, monthly_mean_LAI))%>%
+  #filter years from 2003 to 2015
+  #map(~filter(.x, year(Date) >= 2003 & year(Date) <= 2015))%>%
+##change names from LAI_sub10.csv to  SubLAI10 for all cases using ifelse
+ imap(~ mutate(.x, catch = str_replace(str_replace(.y, "LAIHIQ_sub", "SubLAI"), ".csv", ""), Type = "Observed")) %>%  # Rename list elements and add new columns
+  bind_rows() 
+```
+
+Packages that are needed for this and root.dir same as previous just in case.
+```{r packages, message=FALSE}
+require(tidyverse)
+require(lubridate)
+library(readr)
+library(purrr)
+library(readxl)
+library(lhs)
+
+```
+## Before running this workflow
+1. Make sure file.cio covers the period you will work (calibration or validation)
+2. Review parinf.txt file and make sure it has the parameters you want to calibrate and for the landuses and subbasins you want to do it. Check parmater ranges are OK.
+3. Make sure the observed data is in the right format and in the right folder.
+
+```{r packages, message=FALSE}
+#nombre_run='LastSensitivityallfixed_iter_500'
+ nombre_run="Last_last_Sensitfixed12_500"
+# Define the directory and file names
+full_path <- paste0(directory, "/SUFI2.IN/", nombre_run)
+#full_path <- 'C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/Sensit500_epcoescofreegsifixed/SUFI2.IN'
+goal <- read_table2(str_c(full_path,"/goal_file.txt", sep="/"),
+                    skip=3, col_names=T)
+### this is the goal file used for the run with LHS parameters
+
+```
+
+
+```{r subset}
+
+##We need the goal file for this analysis
+goal_sub <- goal# %>%
+
+```
+
+
+
+## read  combined_performance_all 
+
+```{r subset}
+
+### Tetsing senstivtiy using transformend an non-transformed data. Transformed flow is log flow, ET and LAI are transformed to a cosine function.
+full_path=directory
+combined_performance_all <- read_csv(paste0(directory,'/SUFI2.IN/',nombre_run,'/_performance.csv'))%>%
+  mutate(data='non-transformed')
+combined_performance_all_t <- read_csv(paste0(directory,'/SUFI2.IN/',nombre_run,'/_performance_transformed.csv'))%>%
+  mutate(data='transformed')
+
+####bind and plot by cacth and by iter boxplot of columns
+#combined_performance_both<- rbind(combined_performance_all,combined_performance_all_t)
+combined_performance_both<- rbind(combined_performance_all,combined_performance_all_t)
+library(ggpubr)
+
+combined_performance_both_long <- combined_performance_both %>%
+  select(-c(PBIAS,MSE,SSQR,bR2,Vol_frac))%>%
+  pivot_longer(cols = c(NSE,R2,KGE))#%>%
+
+combined_performance_both_long <- combined_performance_both_long %>%
+  mutate(catch= case_when(
+    str_detect(catch, "sub") ~ str_replace(catch, "sub", "LAI_OUT"),
+    str_detect(catch, "Sub") ~ str_replace(catch, "Sub", "ET_OUT"),
+    TRUE ~ catch
+  )) %>%
+  mutate(catch = str_replace(catch, "\\.txt$", ""))
+
+plot_gg <- ggplot(combined_performance_both_long, aes(x = catch, y = value, color =data)) +
+  geom_boxplot(outlier.shape = NA) + #remove outliers outlier.shape = NA
+  theme_bw() +
+  labs(title = "Performance by station sensitivit 1 run of 500 iterations",
+       x = "Metric",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~name, scales = "free_y")  # Set scales to free_y
+plot_gg
+ # ggsave(filename = paste0(paste0(directory,'/SUFI2.IN/',nombre_run,"/performance_metrics_sensitbox.png")),
+ #       plot = plot_gg ,
+ #       width = 12,
+ #       height = 8,
+ #       units = "in",
+ #       dpi = 300,
+ #       limitsize = FALSE)
+
+plot_gg2 <- ggplot(combined_performance_both_long%>%
+                    filter(name=='KGE'), aes(x = catch, y = value, color =data)) +
+  geom_boxplot() + #remove outliers outlier.shape = NA
+  theme_bw() +
+  labs(title = "Performance by station sensitivit 1 run of 500 iterations",
+       x = "Metric",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylim(-1,1)
+  #facet_wrap(~name, scales = "free_y")  # Set scales to free_y
+plot_gg2
+# ggsave(filename = paste0(paste0(directory,'/SUFI2.IN/',nombre_run,"/performance_metrics_sensitbox_NSE.png")),
+#        plot = plot_gg2 ,
+#        width = 12,
+#        height = 8,
+#        units = "in",
+#        dpi = 300,
+#        limitsize = FALSE)
+
+#### !!!!!!! We will work with non-transformed data 
+```
+
+
+
+```{r }
+## USER INPUT IN WEIGTHS and objective function
+#full_path<-paste0(directory,"/SUFI2.IN/")
+###global sensitivity using weigth
+top_row <- assign_weights(combined_performance_all%>% 
+                            filter(iter %in% 1:500), flow_weight=0.33, ET_weight=0.33, LAI_weight=0.33)
+top_row_individual <- assign_weights(combined_performance_all%>% 
+                            filter(iter %in% 1:500), flow_weight=1, ET_weight=1, LAI_weight=1)
+###### using global sensitivity
+combined_performance_all_weigthed <- find_best_iteration(top_row , metric_type = 'KGE')
+combined_performance_all_weigthed_togoal <- find_best_iteration_2(top_row , metric_type ='KGE')
+best_iter <- find_best_iteration_3(combined_performance_all_weigthed , metric_type ='KGE')
+
+```
+
+####### Now functions to analyse sensitivity in the first run to do parameter selection
+
+```{r}
+# Read goal file if needed
+# goal <- read_table2(str_c(full_path,"/goal_file.txt", sep="/"),
+#                     skip=3, col_names=T)
+# goal_with_OF<-goal
+
+# Function to clean column names and extract numeric prefixes
+process_column_names <- function(name) {
+  # Extract numeric prefix
+  prefix <- str_extract(name, "^[0-9]+")
+  
+  # Clean column name
+  clean_name <- str_replace_all(name, "^[0-9]+[:_]", "")  # Remove numeric prefix and colon
+  clean_name <- str_replace_all(clean_name, "[{}:]", "")    # Remove curly braces and colons
+  clean_name <- str_replace_all(clean_name, "[.,]", "")      # Remove periods and commas
+  clean_name <- str_replace_all(clean_name, "_+", "_")       # Replace multiple underscores with single underscore
+  clean_name <- str_replace_all(clean_name, "^_", "")         # Remove leading underscore if any
+  
+  # Return as a list
+  return(list(prefix = prefix, name = clean_name))
+}
+
+# Apply the function to column names and create new column names
+processed_names <- sapply(colnames(goal_with_OF), process_column_names, simplify = FALSE)
+
+# Extract prefixes and cleaned names
+prefixes <- sapply(processed_names, function(x) x$prefix)
+cleaned_names <- sapply(processed_names, function(x) x$name)
+
+# Create a new data frame with prefixes and cleaned names
+prefix_name_df <- data.frame(
+  Numeric_Prefix = prefixes,
+  Cleaned_Name = cleaned_names,
+  stringsAsFactors = FALSE
+)
+#goal_with_OF_<-goal_with_OF
+# Assign cleaned names to columns (keeping the first column unchanged)
+colnames(goal_with_OF)[-1] <- prefix_name_df$Cleaned_Name[-1]
+
+## sensitivity using goal file
+
+##For sensitivity purposes I will use the same functions but calculate the weighted functions for NSE, KGE, R2, PBIAS, Vol_frac, MSE, SSQR, bR2 for each metric.
+
+
+
+```
+
+```{r}
+library(tidyverse)
+library(broom)
+library(stringr)
+
+  # Define a function to clean column names
+  process_column_names <- function(name) {
+    prefix <- str_extract(name, "^[0-9]+")
+    clean_name <- str_replace_all(name, "^[0-9]+[:_]", "")
+    clean_name <- str_replace_all(clean_name, "[{}:]", "")
+    clean_name <- str_replace_all(clean_name, "[.,]", "")
+    clean_name <- str_replace_all(clean_name, "_+", "_")
+    clean_name <- str_replace_all(clean_name, "^_", "")
+    return(list(prefix = prefix, name = clean_name))
+  }
+  
+  # Function to apply the cleaning process and rename columns
+clean_and_rename_columns <- function(df) {
+  processed_names <- sapply(colnames(df), process_column_names, simplify = FALSE)
+  cleaned_names <- sapply(processed_names, function(x) x$name)
+  colnames(df) <- cleaned_names
+  return(df)
+}
+
+# Process MLR for each OF column
+
+# Example usage
+OF_columns <- c("NSE", "KGE", "R2", "PBIAS", "Vol_frac", "MSE", "SSQR", "bR2")
+
+# Example usage with your dataset
+goal_with_OF <- clean_and_rename_columns(goal_with_OF)
+
+# Define the function to process sensitivity using metrics
+  #  OFs
+  OF_columns <- c("NSE", "KGE", "R2", "PBIAS", "Vol_frac", "MSE", "SSQR", "bR2")
+  
+  process_metrics <- function(data, OF_columns) {
+  data %>%
+    group_by(metric, iter) %>%
+    # Count number of catches per metric
+    # mutate(catch_count = n()) %>%
+    # # Assign weight as 1 / catch_count; if weight is 0, the metric is not considered
+    # mutate(weight = 1 / catch_count) %>%
+    # Calculate weighted values for each OF column
+    mutate(across(all_of(OF_columns), ~ . * weight)) %>%
+    ungroup() %>%
+    group_by(metric, iter) %>%
+    # Summarise to get the sum of weighted values
+    summarise(across(all_of(OF_columns), sum, na.rm = TRUE)) %>%
+    ungroup()
+}
+
+### multiply weitghs per value and sum
+
+## sum by iteration for global sensitivity (weigths 0.33 each)
+top_row_sum <- process_metrics(top_row, OF_columns)%>%
+  group_by(iter) %>%
+  summarise(across(all_of(OF_columns), sum, na.rm = TRUE)) %>%
+  ungroup()%>%
+  mutate(metric='global')
+  
+
+#### do similar plot as plot_gg now with summarised data by variable and iteration
+####bind and plot by cacth and by iter boxplot of columns
+top_row_plot<- rbind(top_row_sum)
+
+top_row_plot_long <- top_row_plot %>%
+  select(-c(PBIAS,MSE,SSQR,bR2,Vol_frac))%>%
+  pivot_longer(cols = c(NSE,R2,KGE))#%>%
+
+
+plot_gg_glo <- ggplot(top_row_plot_long, aes(x = metric, y = value, color =metric)) +
+  geom_boxplot() + #remove outliers outlier.shape = NA
+  theme_bw() +
+  labs(title = "Metric calculated by iteration (global equal weight)",
+       x = "Metric",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~name, scales = "free_y")  # Set scales to free_y
+plot_gg_glo
+
+```
+
+
+```{r}
+
+
+## sum by iteration by metric (weigths 1 each)
+top_row_individual_sum<-process_metrics(top_row_individual, OF_columns)%>%
+  # group_by(iter,metric) %>%
+  # summarise(across(all_of(OF_columns), sum, na.rm = TRUE)) %>%
+  # ungroup()%>%
+  mutate(met='individual_by_metric')
+
+#top_row_t_individual_sum<-process_metrics(top_row_t_individual, OF_columns)
+ #### do similar plot as plot_gg now with summarised data by variable and iteration
+####bind and plot by cacth and by iter boxplot of columns
+top_row_plot<- rbind(top_row_individual_sum)
+
+top_row_plot_long<- top_row_plot %>%
+  select(-c(PBIAS,MSE,SSQR,bR2,Vol_frac))%>%
+  pivot_longer(cols = c(NSE,R2,KGE))#%>%
+##filter values in the range of -1 to 1
+ # filter(value>=-1 & value<=1)
+
+plot_gg_ind <- ggplot(top_row_plot_long, aes(x = metric, y = value, color =met)) +
+  geom_boxplot(outlier.shape = NA) + #remove outliers outlier.shape = NA
+  theme_bw() +
+  labs(title = "Metric calculated by iter, by variable",
+       x = "Metric",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~name, scales = "free_y")  # Set scales to free_y
+plot_gg_ind
+
+library(patchwork)
+  x<-patchwork::wrap_plots(plot_gg_glo, plot_gg_ind, ncol = 1)+
+  plot_annotation (title = "Performance metric in sensitivity analysis (1 run of 500 iterations)")
+
+  ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/sensitivity_analysis4.png"), plot = x, width = 10, height = 7, units = "in", dpi = 500)
+  
+```
+
+```{r}
+
+### plot goalfile by parameter using goal
+goal_long <- goal %>%
+  pivot_longer(cols = -c(Sim_No.)) %>%
+  mutate(
+    parameter_name = case_when(
+      str_detect(name, "\\{") ~ str_extract(name, "(?<=v__|r__)[^\\{]+"),
+      TRUE ~ str_extract(name, "(?<=__).+?(?=__)")
+    ),
+    land_type = case_when(
+      str_detect(name, "\\{144\\}") ~ "PINE",
+      str_detect(name, "\\{12\\}") ~ "PAST",
+      TRUE ~ str_extract(name, "PINE|PAST|GRAS")
+    )
+  )%>%
+  mutate(param_cat= case_when(
+    value > 100 ~ "High",
+    value > 5 ~ "Low",
+     value < 2 ~ "Very Low")
+  )
+
+plot_high <- ggplot(goal_long %>%
+                      filter(param_cat == "High" & land_type %in% c('PINE', 'PAST')), 
+                    aes(x = parameter_name, y = value, fill = land_type)) +
+  geom_boxplot(outlier.shape = NA) + # Hide outliers
+  theme_bw() + # Use a clean white background
+  labs(title = "",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x-axis labels
+  scale_fill_manual(values = c("PINE" = "forestgreen", "PAST" = "goldenrod")) + # Custom colors
+  facet_wrap(~land_type, scales = "fixed") # Facet by land_type
+
+plot_medium <- ggplot(goal_long %>%
+                        filter(param_cat == "Low" & land_type %in% c('PINE', 'PAST')), 
+                      aes(x = parameter_name, y = value, fill = land_type)) +
+  geom_boxplot(outlier.shape = NA) + # Hide outliers
+  theme_bw() + # Use a clean white background
+  labs(title = "",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x-axis labels
+  scale_fill_manual(values = c("PINE" = "forestgreen", "PAST" = "goldenrod")) + # Custom colors
+  facet_wrap(~land_type, scales = "fixed") # Facet by land_type
+
+plot_low <- ggplot(goal_long %>%
+                     filter(param_cat == "Very Low" & land_type %in% c('PINE', 'PAST')), 
+                   aes(x = parameter_name, y = value, fill = land_type)) +
+  geom_boxplot(outlier.shape = NA) + # Hide outliers
+  theme_bw() + # Use a clean white background
+  labs(title = "",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x-axis labels
+  scale_fill_manual(values = c("PINE" = "forestgreen", "PAST" = "goldenrod")) + # Custom colors
+  facet_wrap(~land_type, scales = "fixed") # Facet by land_type
+
+combined_plot <- (plot_low / plot_medium / plot_high) +
+  plot_layout(guides = 'collect') + # Collect legends into a single guide
+  plot_annotation(title = "Distribution of parameters by land use in the sensitivty analysis") # Title for the combined plot
+
+combined_plot
+ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/sensitivity_analysis5.png"), plot = combined_plot, width = 10, height = 10, units = "in", dpi = 500)
+
+```
+
+
+
+```{r}
+
+library(tidyr)
+
+  # Define the function to perform MLR and return coefficients
+run_mlr <- function(data, response_var, of_columns) {
+  # Identify predictor columns (excluding OF columns)
+  predictors <- setdiff(colnames(data), of_columns)
+ # browser()
+  # Create the formula for MLR
+  predictors_quoted <- paste0("`", predictors, "`")
+  formula_text <- paste(response_var, "~", paste(predictors_quoted, collapse = "+"))
+  
+  # Print the formula to debug
+  print(paste("Formula: ", formula_text))
+  
+  # Create formula object
+  formula <- as.formula(formula_text)
+ 
+  clean_data <- data %>%
+  filter(!is.na(.[[response_var]])) %>%
+  filter(!is.nan(.[[response_var]])) %>%
+  filter(!is.infinite(.[[response_var]])) %>%
+  filter(if_all(all_of(predictors), ~ !is.na(.) & !is.nan(.) & !is.infinite(.)))
+  # Fit the model
+  model <- lm(formula, data = clean_data)
+  
+  # Extract coefficients and statistics
+  tidy(model)
+}
+
+
+#  OFs
+  OF_columns <- c("NSE", "KGE", "R2", "PBIAS", "Vol_frac", "MSE", "SSQR", "bR2")
+  
+
+# Define the function to process each OF column
+process_of_columns <- function(data) {
+  # Initialize an empty list to store results
+  results <- list()
+    # List of OF columns
+  OF_columns <- c("NSE", "KGE", "R2", "PBIAS", "Vol_frac", "MSE", "SSQR", "bR2")
+    # Loop over each OF column
+  for (of_col in OF_columns) {
+    # Run MLR for each OF column, passing both the response variable and the OF columns
+    result <- run_mlr(data, response_var = of_col, of_columns = OF_columns)
+        # Store the result in the list
+    results[[of_col]] <- result
+  }
+  
+  # Combine results into a single dataframe
+  end <- bind_rows(results, .id = "OF_column")
+  
+  return(end)
+}
+
+```
+
+```{r}
+
+ ############# ### CHOSE SIGNIFICANCE!!
+ significance<-0.1#p.value < significance
+
+goal_with_OF<-goal 
+### Analysis
+#top_row_sum 
+OF_column <- c("NSE", "KGE", "R2", "PBIAS", "Vol_frac", "MSE", "SSQR", "bR2")
+ # Sensitivity Analysis global analysis
+ # sensit_metric <- right_join(goal_with_OF, top_row_sum, by = c("Sim_No" = "iter")) %>% select(-c(goal_value, Sim_No))
+  # sensit_metric_et <- sensit_metric %>% filter(metric == 'ET') %>% select(-c(metric, goal_value, Sim_No))
+  # sensit_metric_lai <- sensit_metric %>% filter(metric == 'LAI') %>% select(-c(metric, goal_value, Sim_No))
+library(broom)
+  sensit_metric <- right_join(goal_with_OF, top_row_sum, by = c("Sim_No."   = "iter")) %>% 
+    select(-c("Sim_No.",metric))
+# Process MLR results for each metric
+# for global
+mlr_results_flow <- process_of_columns(sensit_metric) %>%
+  filter(term != '(Intercept)') %>%
+  group_by(OF_column) %>%
+  mutate(
+    estimate = round(estimate, 2),
+    std.error = round(std.error, 2),
+    statistic = round(statistic, 2),
+    p.value = round(p.value, 2)
+  ) %>%
+  mutate(metric = 'global')
+
+# Combine results and add additional columns
+mlr_results_top_row_sum <- bind_rows(mlr_results_flow) %>%
+  mutate(data = 'non-transformed', metric = 'global')%>%
+  mutate(Significance=ifelse(p.value < significance, "Significant", "Not Significant"))%>%
+  ### extract significance by of column
+  group_by(OF_column)%>%
+ # filter(Significance=="Significant")%>%
+  ungroup()
+
+# ### each variable is 0.33, I am now doing sum of the three per iter
+#now with transformed data
+ # sensit_metric <- right_join(goal_with_OF, top_row_t_sum, by = c("Sim_No" = "iter"))%>% select(-c('goal_value','Sim_No'))
+#     
+# 
+
+###For plotting and filea result I am now deleting redundant metrics that migth inform similar charcterstics
+## Go with NSE, KGE for overall, PBIAS instead of Volumen Fracion, MSE instead of R2 and SSQR, bR2
+
+ mlr_sumtoplot<-bind_rows( mlr_results_top_row_sum)
+##mutate term column and remove _34911 and _3410111214
+ 
+ a<-ggplot(mlr_sumtoplot, aes(x = term, y = OF_column, fill = p.value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(colors = c("red", "yellow", 'blue',"green"), values = c(0, 0.05, significance, 1),
+                       limits = c(0, 1), na.value = "grey50") +
+  geom_text(aes(label = ifelse(Significance == "Significant", "*", "")), color = "black", size = 4) +
+  labs(title = "p-values from MLR for global sensitivity 500 iterations",
+       subtitle = paste0("Significant is * < ",significance),
+       x = "Variable",
+       y = "OF column",
+       fill = "p-value") +
+   theme_minimal() +
+  theme(axis.text.x = element_text(angle =  90, hjust = 1,vjust=0.5),
+        ## add tick marks in axis
+        axis.ticks.x = element_line(color = "black", size = 0.5),
+        axis.ticks.y = element_line(color = "black", size = 0.5),
+        axis.text.y = element_text(size = 8)) +
+  facet_wrap(~interaction(data,metric), scales = "free_y", ncol=1)
+  
+
+print(a)
+ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/sensitivity_analysis3","pval", significance,".png"), plot = a, width = 10, height = 7, units = "in", dpi = 500)
+
+```
+
+```{r}
+
+a<-ggplot(mlr_sumtoplot%>%
+            filter(OF_column%in%c('NSE','KGE','PBIAS','MSE')), aes(x = term, y = OF_column, fill = p.value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(colors = c("red", "yellow", 'blue',"green"), values = c(0, 0.05, significance, 1),
+                       limits = c(0, 1), na.value = "grey50") +
+  geom_text(aes(label = ifelse(Significance == "Significant", "*", "")), color = "black", size = 4) +
+  labs(title = "p-values from MLR for global sensitivity 500 iterations",
+       subtitle = paste0("Significant is * < ",significance),
+       x = "Variable",
+       y = "OF column",
+       fill = "p-value") +
+   theme_minimal() +
+  theme(axis.text.x = element_text(angle =  90, hjust = 1,vjust=0.5),
+        ## add tick marks in axis
+        axis.ticks.x = element_line(color = "black", size = 0.5),
+        axis.ticks.y = element_line(color = "black", size = 0.5),
+        axis.text.y = element_text(size = 8)) +
+  facet_wrap(~interaction(data,metric), scales = "free_y", ncol=1)
+  
+
+print(a)
+#ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/sensitivity_analysis3_reducemetrics","pval", significance,".png"), plot = a, width = 10, height = 7, units = "in", dpi = 500)
+
+```
+
+```{r}
+
+##### 
+
+ ############# ### CHOSE SIGNIFICANCE!!
+
+#p.value < significance
+
+ # Sensitivity Analysis
+  sensit_metric <- right_join(goal_with_OF, top_row_individual_sum , by = c("Sim_No." = "iter"))
+  # sensit_metric_flow <- sensit_metric %>% filter(metric == 'flow') %>% select(-c(metric, goal_value, Sim_No))
+  # sensit_metric_et <- sensit_metric %>% filter(metric == 'ET') %>% select(-c(metric, goal_value, Sim_No))
+  # sensit_metric_lai <- sensit_metric %>% filter(metric == 'LAI') %>% select(-c(metric, goal_value, Sim_No))
+ sensit_metric_flow <- sensit_metric %>% filter(metric == 'flow') %>% select(-c(metric, "Sim_No.",met))
+  sensit_metric_et <- sensit_metric %>% filter(metric == 'ET') %>% select(-c(metric,  "Sim_No.",met))
+  sensit_metric_lai <- sensit_metric %>% filter(metric == 'LAI') %>% select(-c(metric,"Sim_No.",met))
+  
+# For flow
+mlr_results_flow <- process_of_columns(sensit_metric_flow) %>%
+  filter(term != '(Intercept)') %>%
+  group_by(OF_column) %>%
+  mutate(
+    estimate = round(estimate, 5),
+    std.error = round(std.error, 2),
+    statistic = round(statistic, 2),
+    p.value = round(p.value, 2)
+  ) %>%
+  mutate(metric = 'flow')
+
+# For ET
+mlr_results_et <- process_of_columns(sensit_metric_et) %>%
+  filter(term != '(Intercept)') %>%
+  group_by(OF_column) %>%
+  mutate(
+    estimate = round(estimate, 10),
+    std.error = round(std.error, 2),
+    statistic = round(statistic, 2),
+    p.value = round(p.value, 2)
+  ) %>%
+  mutate(metric = 'ET')
+
+# For LAI
+mlr_results_lai <- process_of_columns(sensit_metric_lai) %>%
+  filter(term != '(Intercept)') %>%
+  group_by(OF_column) %>%
+  mutate(
+    estimate = round(estimate, 10),
+    std.error = round(std.error, 2),
+    statistic = round(statistic, 2),
+    p.value = round(p.value, 2)
+  ) %>%
+  mutate(metric = 'LAI')
+  
+mlr_results_top_row_sum  <-bind_rows(mlr_results_flow,mlr_results_et,mlr_results_lai)%>%
+  mutate(data='not-transformed',analysis='individual')%>%
+  mutate(Significance=ifelse(p.value < significance, "Significant", "Not Significant"))%>%
+  ### extract significance by of column
+  group_by(OF_column)%>%
+#  filter(Significance=="Significant")%>%
+  ungroup()
+##both
+
+all_signif<-bind_rows(mlr_results_top_row_sum)
+
+
+```
+
+```{r}
+##Clean names for plotting
+
+all_signif_or <-  all_signif%>%
+ mutate(term_clean = str_extract(term, "[:alnum:]+__.*")) %>%
+  #extract final character  ` 
+  mutate(term_clean = str_remove(term_clean, "^`|`$")) %>%
+  mutate(term_clean = as.character(term_clean)) %>%  # Ensure term_clean is a character
+  mutate(term_column = str_replace_all(term_clean, c("PAST" = "past", "GRAS" = "gras", "PINE" = "pine")))%>%
+   mutate(term_column = str_replace_all(term_column, "_{2,}", "_"))%>%
+  mutate(term_column = str_replace_all(term_column, "V_R", "v_R"))
+  
+### order of parameters
+
+order<-c("v_CH_K2.rte_pine",          "v_CH_K2.rte_past",          "v_ALPHA_BF.gw_past",        "v_ALPHA_BF.gw_pine" ,      
+ "a_GW_DELAY.gw_past" ,       "a_GW_DELAY.gw_pine"    ,    "v_GWQMN.gw_pine"    ,       "v_GWQMN.gw_past,gras"   ,  
+ "r_CN2.mgt_pine"           , "r_CN2.mgt_past,gras"     ,  "v_OV_N.hru_past,gras"      ,"v_OV_N.hru_pine",          
+ "v_EPCO.hru_pine"          , "v_EPCO.hru_past,gras"     , "v_ESCO.hru_pine"          , "v_ESCO.hru_past,gras"   ,  
+ "v_CANMX.hru_pine"        ,  "v_GW_REVAP.gw_pine"     ,   "v_GW_REVAP.gw_past,gras"   ,"v_GSI{144}.plant.dat"  ,   
+ "v_GSI{12}.plant.dat"    ,   "v_MAT_YRS{144}.plant.dat",  "v_DLAI{144}.plant.dat"    , "v_DLAI{12}.plant.dat"    , 
+ "v_CHTMX{144}.plant.dat"   , "v_REVAPMN.gw_pine"        , "v_REVAPMN.gw_past,gras"  ,  "v_VPDFR{144}.plant.dat"   ,
+"v_VPDFR{12}.plant.dat"    , "r_T_BASE{144}.plant.dat",   "r_T_OPT{144}.plant.dat"   , "r_T_BASE{12}.plant.dat"   ,
+ "r_T_OPT{12}.plant.dat"  ,   "v_BLAI{144}.plant.dat"  ,   "v_BLAI{12}.plant.dat"    ,  "v_ALAI_MIN{144}.plant.dat",
+ "v_ALAI_MIN{12}.plant.dat" , "v_LAIMX1{144}.plant.dat" ,  "v_LAIMX2{144}.plant.dat"  , "v_FRGRW1{144}.plant.dat"  ,
+ "v_FRGRW2{144}.plant.dat"  , "v_LAIMX1{12}.plant.dat"   , "v_LAIMX2{12}.plant.dat"  ,  "v_FRGRW1{12}.plant.dat",
+ "v_FRGRW2{12}.plant.dat"   )
+
+
+# 
+# reference_order <- c(
+#   "v__CH_K2.rte______PINE", "v__CH_K2.rte______PAST",
+#   "v__ALPHA_BF.gw______PAST", "v__ALPHA_BF.gw______PINE", 
+#   "a__GW_DELAY.gw______PAST,GRAS", "a__GW_DELAY.gw______PINE",
+#   "v__GWQMN.gw______PINE", "v__GWQMN.gw______PAST,GRAS", 
+#   "r__CN2.mgt______PINE", "r__CN2.mgt______PAST,GRAS", 
+#   "v__OV_N.hru______PAST,GRAS", "v__OV_N.hru______PINE",
+#   "v__EPCO.hru______PINE", "v__EPCO.hru______PAST,GRAS", 
+#   "v__ESCO.hru______PINE", "v__ESCO.hru______PAST,GRAS", 
+#   "v__CANMX.hru______PINE", "v__GW_REVAP.gw______PINE", "v__GW_REVAP.gw______PAST,GRAS",
+#   "v__GSI{144}.plant.dat", "v__GSI{12}.plant.dat",
+#   "v__MAT_YRS{144}.plant.dat", "v__DLAI{144}.plant.dat", "v__DLAI{12}.plant.dat",
+#   "v__CHTMX{144}.plant.dat", "V__REVAPMN.gw______PINE", "V__REVAPMN.gw______PAST,GRAS",
+#   "v__VPDFR{144}.plant.dat", "v__VPDFR{12}.plant.dat", "r__T_BASE{144}.plant.dat",
+#   "r__T_OPT{144}.plant.dat", "r__T_BASE{12}.plant.dat", "r__T_OPT{12}.plant.dat",
+#   "v__BLAI{144}.plant.dat", "v__BLAI{12}.plant.dat", "v__ALAI_MIN{144}.plant.dat",
+#   "v__ALAI_MIN{12}.plant.dat", "v__LAIMX1{144}.plant.dat", "v__LAIMX2{144}.plant.dat",
+#   "v__FRGRW1{144}.plant.dat", "v__FRGRW2{144}.plant.dat", "v__LAIMX1{12}.plant.dat",
+#   "v__LAIMX2{12}.plant.dat", "v__FRGRW1{12}.plant.dat", "v__FRGRW2{12}.plant.dat"
+# )
+# 
+# # 
+# all_signif_or <- all_signif_or%>%
+#   mutate(order = match(term_clean, reference_order)) %>%
+#   arrange(order)%>%
+#   mutate(term_2 = factor(term_clean, levels = reference_order))
+
+all_signif_or_or <- all_signif_or %>%
+  mutate(term_column_or = factor(term_column, levels = order)) %>%
+  mutate(metric_2 = case_when(
+    metric == "ET" ~ "ET",
+    metric == "flow" ~ "streamflow",
+    metric == "LAI" ~ "LAI"
+  ))
+
+d <- ggplot(all_signif_or_or  %>%
+              filter(data == 'not-transformed') %>%
+              na.omit() %>%
+              filter(OF_column %in% c('NSE', 'KGE', 'PBIAS', 'R2')), 
+            aes(y = term_column_or, x = OF_column, fill = p.value)) +  # Swap x and y
+  geom_tile(color = "white") +
+  scale_fill_gradientn(colors = c("red", "yellow", 'orange', 'skyblue', "lightgreen"), 
+                       values = c(0, 0.05, significance, 0.2, 1),
+                       limits = c(0, 1), na.value = "white") +
+  geom_text(aes(label = ifelse(Significance == "Significant", "*", "")), color = "black", size = 4) +
+  labs(title = "p-values from MLR in sensitivity analysis",
+       subtitle = paste0("Significant is * < ", significance),
+       y = "Variable",  # Adjust the labels
+       x = "OF column",
+       fill = "p-value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5),  # Adjust angle if needed
+        axis.ticks.x = element_line(color = "black", size = 0.5),
+        axis.ticks.y = element_line(color = "black", size = 0.5),
+        axis.text.y = element_text(size = 8)) +
+  facet_wrap(~interaction(metric), scales = "free_x", nrow = 1)  # Adjust to `free_x` if needed
+
+ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/sensitivity_analysis1_reducemetrics_22_ordered","pval", significance,".png"), plot = d, width = 8, height = 9, units = "in", dpi = 500)
+
+```
+
+
+
+```{r}
+#### filter significant parameters and plot estimates
+all_signif_or_or_table_sig<-all_signif_or_or%>%
+  filter(Significance=="Significant")%>%
+  mutate(color_estimate = ifelse(estimate > 0, "red", "blue"))%>%
+  mutate(estimate_scientific = sprintf("%.2e", estimate))
+
+library(scales)
+d_estimate <- ggplot(all_signif_or_or_table_sig %>%
+                        filter(data == 'not-transformed') %>%
+                        na.omit() %>%
+                        filter(OF_column %in% c('NSE', 'KGE', 'PBIAS', 'R2')), 
+                    aes(y = term_column_or, x = OF_column, fill = estimate > 0)) +  # Map positive vs. negative
+  geom_tile(color = "white") +  # Create the matrix tiles
+  geom_text(aes(label= estimate_scientific),size = 2) +  # Adjust the size of the text
+  labs(title = "Estimates for sensitive parameters",
+       subtitle = paste0("Estimates are colored red for positive and blue for negative"),
+       y = "Variable",  # Adjust the labels
+       x = "OF column",
+       fill = "Estimate") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5),
+        axis.ticks.x = element_line(color = "black", size = 0.5),
+        axis.ticks.y = element_line(color = "black", size = 0.5),
+        axis.text.y = element_text(size = 8)) +
+  facet_wrap(~interaction(metric), scales = "free_x", nrow = 1) +  # Adjust facets
+  scale_fill_manual(values = c("red", "blue"))  # Red for positive, blue for negative
+
+
+ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/sensitivity_analysis1_reducemetrics_estimate","pval", significance,".png"), plot = d_estimate, width = 8, height = 9, units = "in", dpi = 500)
+
+```
+

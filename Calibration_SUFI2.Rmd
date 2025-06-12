@@ -1,0 +1,2014 @@
+---
+title: "Calibration_29parms"
+author: "EN"
+date: "2024-06-17"
+output: html_document
+---
+
+# Introduction
+
+This is a workflow to  run a  multi-variable calibration of the SWAT model using the SUFI2 algorithm. The calibration is done using R instead of SWAT-CUP interface, but using some of the .exe files form SWAT-CUP.
+The advantages of this code is that it allows to
+-save outputs in every iteration from more than one output
+-calculate OF in every iteration 
+
+At the moment the multi-step is manual, as I will run this with three par inf determined by the previous run and adding parameters. 
+
+I am reading observed data from excel and creating a data frame to use in R instead of using SWAT-CUP files as Observed.txt and SUFI2_new_pars.exe
+Start and end year are dependant of Calibration or Validation period, and assigned by the user. 
+
+##Inputs
+Observed data of variables to calibrate: Flow, ET, LAI
+User choice of how many variables and wigth assigned, to use for Objective function calculation. 
+-multi-step strategy here will use only one variabl for OF calculation (each step)
+-multi-objective will use three fo them at a time. 
+-Number of iteration given by the user to create a folder containing results fro SWAT, results from Objective function and beh file for plotting. 
+
+##The outputs of this code are:
+output_extract results for each iteration in a list containing ET, Flow and LAI data 
+results of objective function values for each iteration
+best range parameters 
+Beh file for plotting
+new range parameters for the next step.
+
+##Functions needed:
+A. Read parinf file and generate goal file. Run calibration using swat.exe. Save variables. 
+B. Calculate for each run OF given weigths and re-fill goal file. Out: 2 lists one with variables and other with OF depending on period selected and observed data. 
+C. Best simulation and beh.
+D. New parinf write consideirng reasonable ranges to repeat. 
+E. Repeat up to number iterations (eg. 4)
+
+Then for multi-variable I need a chuck to add new parameters
+For multi-objective I do not need this, just repeat for 4 iterations 
+
+## Select the SUFI2 project to work with 
+
+```{r setup, include=T, echo = F}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup")
+
+```
+
+Packages that are needed for this and root.dir same as previous just in case.
+```{r packages, message=FALSE}
+require(tidyverse)
+require(lubridate)
+library(readr)
+library(cowplot)
+library(purrr)
+library(readxl)
+library(lhs)
+library(purrr)
+##DO NOT FORGET TO CHANGEE ROOT DIR WHEN RUNING FLOW OR FLOW+ET CALIBRATION
+
+root.dir = "C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup"
+#root.dir = "C:/Users/ener0590/Desktop/LC_newsoil_newdelim.Sufi2.SwatCup"
+
+ directory = root.dir
+ source<-"C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/Sensit500_epcoescofreegsifixed"
+ 
+source(paste0( source,"/Fun7_OF_calc.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun6_OF_eval.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun5_perform_fun.R"), local = knitr::knit_global())
+source(paste0(source,"/Fun4_OutpuExtract_LAI.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun3_OutpuExtract_ET.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun2_OutpuExtract_reach.R"), local = knitr::knit_global())
+source(paste0( source,"/Fun1_LHS.R"), local = knitr::knit_global())
+
+```
+## Before running this workflow
+1. Make sure file.cio covers the period you will work (calibration or validation)
+2. Review parinf.txt file and make sure it has the parameters you want to calibrate and for the landuses and subbasins you want to do it. Check parmater ranges are OK.
+3. Make sure the observed data is in the right format and in the right folder.
+
+## Reading in the observed data (This could be done from SUFI2 inputs or from datasets in Observed_var folder)
+
+```{r et_data}
+
+###Upload ET observed data
+et_df2 <- readRDS(file = "C:/Users/Lenovo/Desktop/LC_subbasins/ET_newdel/process data/processed_files_name.RDS")
+et_df3<-et_df2
+#et_df2 example
+# 1              1  ET_processed_aet_sub12.csv_1_2003  91.20306
+
+##et_df 
+# Date          ET
+#    <date>     <dbl>
+#  1 2003-01-01  91.2
+
+##ready to be used
+```
+
+```{r flow_data}
+#read file with flow data and extract flow columns to create a .rds file
+#read files
+flow_11 <- read_excel("C:/Users/Lenovo/Desktop/LC_subbasins/Flow_lc_OK/flow_14_allok.xlsx")
+flow_12 <- read_excel("C:/Users/Lenovo/Desktop/LC_subbasins/Flow_lc_OK/flow_15_allok.xlsx")
+
+### list files flow_14 and flow_15
+flow_df <- list(flow_11, flow_12)
+#id names to "FLOW_OUT_14" AND "FLOW_OUT_15"
+names(flow_df) <- c("FLOW_OUT_11", "FLOW_OUT_12") #string identifier in observed.txt in FLOW_OUT_14 and FLOW_OUT_15
+
+### add Date column grep month as number after FLOW_OUT_ and up to _ and year after _ and up to end of the string in name column
+##first mutate to find month and year
+
+#List of data frames named data_frames_list
+flow_df_date <- map(flow_df, ~ mutate(.x,
+                                                  month = as.integer(sub("FLOW_OUT_([0-9]+)_([0-9]+)", "\\1", name)),
+                                                  year = as.integer(sub("FLOW_OUT_([0-9]+)_([0-9]+)", "\\2", name))))
+flow_df_date2 <- map(flow_df_date , ~ mutate(.x, Date = make_date(year=year, month=month)))%>%
+  map(~select(.x, Date, flow))
+
+#save list as .RDS file
+#saveRDS(flow_df_date2, "C:/Users/Lenovo/Desktop/LC_subbasins/Flow_lc/flow_df_date.RDS")
+
+#### merge lists flow_df_date and et_df3
+merged_list <- c(flow_df_date2, et_df3) ## used as it is or separately
+```
+
+```{r }
+LAI_obs <- readRDS(file = "C:/Users/Lenovo/Desktop/LC_subbasins/LAIHIQ_data_newdel/processed_data.rds") ## LAI HIQ data
+## ungroup to make sure the list is not grouped and prevent adding missing grouping variables: `month`
+LAI_df <- map(LAI_obs, ~ungroup(.x))
+
+LAI_df3 <- LAI_df %>%
+  map(~.x[-1,]) %>%
+  map(~mutate(.x, Date = make_date(year=year, month=month))) %>%
+  map(~rename(.x, monthly_mean_LAI =  monthly_mean )) %>%
+  map(~select(.x, Date, monthly_mean_LAI))%>%
+  #filter years from 2003 to 2015
+  #map(~filter(.x, year(Date) >= 2003 & year(Date) <= 2015))%>%
+##change names from LAI_sub10.csv to  SubLAI10 for all cases using ifelse
+ imap(~ mutate(.x, catch = str_replace(str_replace(.y, "LAIHIQ_sub", "SubLAI"), ".csv", ""), Type = "Observed")) %>%  # Rename list elements and add new columns
+  bind_rows() 
+
+```
+###HRU_fraction data input for calculation of monthly LAI simulated values
+
+```{r}
+#read HRU fraction data
+# First we need to read .hru files
+parse_hru_file <- function(file_path) {
+  # Read the file lines
+  lines <- readLines(file_path)
+  # then create empty variables
+  hru_number <- NA
+  subbasin_number <- NA
+  land_use <- NA
+  soil_type <- NA
+  hru_fraction <- NA
+    # extract HRU number and Subbasin from the first line of each .hru file
+  header_line <- lines[1]
+  hru_number <- sub(".*HRU:(\\d+).*Subbasin:.*", "\\1", header_line)
+  subbasin_number <- sub(".*Subbasin:(\\d+).*HRU:.*", "\\1", header_line)
+  # then extract LandUse from the header line
+  land_use <- sub(".*Luse:(\\S+).*", "\\1", header_line)
+  # and soil code from the header line
+  soil_type <- sub(".*Soil:\\s*(.*?)\\s+Slope:.*", "\\1", header_line)
+   # Extract HRU_Fraction from the second line
+  if (length(lines) > 1) {
+    fraction_line <- lines[2]
+    # Ensure correct extraction of HRU_Fraction
+   # hru_fraction <- str_extract(fraction_line, "\\s*(\\d+\\.\\d+)\\s*\\|")
+    hru_fraction <- str_extract(fraction_line, "\\s*(\\d+\\.\\d+)\\s*\\|")
+    #hru_fraction_clean <- as.numeric(sub("\\s*\\|", "", hru_fraction))
+  }
+  
+  # Finally create a data frame that will be used for wiegthing LAI outputs
+  return(data.frame(
+    HRU = hru_number,
+    Subbasin = subbasin_number,
+    LandUse = land_use,
+    SoilType = soil_type,
+    HRU_Fraction = hru_fraction,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# List of .hru files ( this needs to change this  your actual file paths)
+file_paths <- list.files(path = directory, pattern = "\\.hru$", full.names = TRUE)
+# Read all .hru files
+data_list <- lapply(file_paths, parse_hru_file)
+
+# Combine the data into a single data frame
+hru_data <- bind_rows(data_list)%>%
+  mutate(HRU_Fraction = as.numeric(sub("\\s*\\|", "", HRU_Fraction )))
+
+hru_frac_sub<-hru_data%>%
+  group_by(LandUse, Subbasin)%>%
+  arrange(HRU_Fraction) 
+
+## create a final table with HRU fractions higher per subbasin adn landuse
+#select subbasins 3, 4,9, 11 6,8,7,10,12
+hru_frac_sub_max<-hru_frac_sub%>%
+  filter(Subbasin %in% c(3, 4, 9, 11, 6, 8, 7, 10, 12))%>%
+  filter(HRU_Fraction==max(HRU_Fraction))
+
+#hru_frac_sub_max
+
+### save the table
+hru_frac_sub_sel<-hru_frac_sub%>%
+  filter(Subbasin %in% c(3, 4, 9, 11, 6, 8, 7, 10, 12))%>%
+  mutate(HRU = as.numeric(HRU))
+  
+# ggsave("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/LaCorona_OK_newdelineation/LaCorona_OK/Scenarios/Default/TxtInOut/hru_frac_sub_selected.csv", hru_frac_sub_sel, row.names = FALSE)
+
+```
+
+## the goal.txt file
+
+Here I have chosen KGE as the objective function.
+
+Read in goal.txt from the folder. We need to skip the first 3 lines, as this just lists some of the metadata of the run, such as the number pf parameters, the number of simulations (particles), and the number of iterations and the type of goal function (KGE in my case). This will not be used but it is a good practice.
+
+
+```{r read_in, warning=FALSE}
+# read in the parinf file
+# Generate goal file with the same parameters as parainf file 
+par_inf_file <- read_lines(paste(directory,"/SUFI2.IN/par_inf.txt", sep=""))
+#writeLines(par_inf_file, paste0(directory,"/SUFI2.IN/",nombre_run,"/0_par_inf_file.txt"))
+```
+
+```{r}
+# Extract the number of simulations in the file (this will be used later)
+
+iterations_n <- par_inf_file[grep("number of simulations", par_inf_file )] %>% 
+  str_extract("\\d+") %>% 
+  as.numeric()
+
+# Extract the parameter lines up to "//--------------" to have the RIGTH PAR_INF FILE
+parameters_inf_file <- par_inf_file[1:(grep("//--------------", par_inf_file) - 1)]
+
+# Create a tibble with parameter, min, and max values
+
+param_forgoal <-parameters_inf_file[3:length(parameters_inf_file)]%>%
+  as_tibble()%>%
+  separate(col = value, into = c("param","min_value", "max_value"), sep = "\t")%>%
+  mutate(
+    min_value = as.numeric(min_value),
+    max_value = as.numeric(max_value))
+
+## select paramaters and min max for LHS
+param_forgoal_lhs<-param_forgoal %>%
+  select(param, min_value, max_value)%>%
+  filter(!is.na(min_value) & !is.na(max_value))#%>%
+  ##remove first two rows
+ # slice(1:n())
+  
+# Output the results to check
+print(param_forgoal_lhs)
+
+``` 
+
+```{r }
+cat("Number of iterations is", iterations_n, "\n")
+```
+
+Now generate goal file.txt using Random sample of n parameters within a given range using Latin Hypercube Sampling. This is inspierd in the code from tanva.
+https://github.com/tamnva/R-SWAT/discussions @param nIter The number of samples
+
+```{r }
+nombre_run<- "Calibraiton_1"  #change name of run
+goalfun_name<- "KGE"
+iterations_n=500
+param_forgoal_lhs_2<-param_forgoal_lhs#%>%
+#  select(min_value, max_value)
+```
+
+```{r, include=FALSE}
+source("C:/Users/ener0590/Desktop/Fun1_LHS.R", local = knitr::knit_global())
+```
+
+```{r}
+# Perform LHS sampling set this seed so it will be the same each time
+set.seed(1000)
+
+# Perform LHS sampling
+param_sampling <- lhsRange(iterations_n, param_forgoal_lhs_2)
+
+
+# Write the sampled parameters to 'goal file.txt'
+# Prepare the header
+header_lines <- c(
+  paste("no_pars= ", nrow(param_forgoal_lhs_2)), paste("no_Sims= ", iterations_n), paste(
+  "type_of_goal_fn= ",goalfun_name)
+  # paste0("Sim_No.     ", paste(1:nrow(param_forgoal_lhs_2), ":", param_forgoal_lhs_2$param, collapse="  "))
+)
+
+header_params <- paste(
+  "Sim_No.     ", 
+  paste0(seq_along(param_forgoal_lhs_2$param), ":", param_forgoal_lhs_2$param, collapse="   ")
+)
+# Write to file in a folder with name nombre_run
+# Define the directory and file names
+full_path <- paste0(directory, "/SUFI2.IN/", nombre_run)
+
+# Ensure the directory exists
+dir.create(full_path, recursive = TRUE, showWarnings = FALSE)
+# Define the file path
+goal_file_path <- paste0(full_path, "/goal_file.txt")
+
+# Write the header to the file
+writeLines(c(header_lines, header_params), goal_file_path)
+
+# Write the sampled parameters to the file, tab-separated and appending without column names
+write.table(param_sampling, goal_file_path, row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t", append = TRUE)
+
+##readl goalfile 
+#goal <- read_table2(goal_file_path, skip=3, col_names = FALSE)
+
+goal <- read_table2(str_c(full_path,"/goal_file.txt", sep="/"),
+                    skip=3, col_names=T)
+### this is the goal file used for the run with LHS parameters
+writeLines(par_inf_file, paste0(directory,"/SUFI2.IN/",nombre_run,"/0_par_inf_file.txt"))
+#Not using the choose "behavioural solutions" as NSE > 0.1
+```
+
+```{r subset}
+
+## Create goal_sub as the whole goal file or a subset (depends on your run)
+goal_sub <- goal
+
+# If goal file already exists: 
+#full_path<-paste0(directory,"/SUFI2.IN/",nombre_run)
+# goal <- read_table2(str_c(full_path,"goal_file.txt", sep="/"),
+#                     skip=3, col_names=T)
+
+```
+
+## read the model.in file
+
+This file is in the main SWAT-CUP folder (the root directory for this document). I am using the `read_lines` function as this reads each line as a single element of a vector  
+
+```{r model_in}
+model_in <- read_lines(paste0(directory,"/model.in"))
+model_in_path<-paste0(directory,"/model.in")
+                       # model_in <- read_lines(paste(directory,"C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LCnewsoil_forR2.Sufi2.SwatCup/model.in")
+
+### rewrite lines using parm lines in param_forgoal_lhs_2 file and add a tab and the min value (this will be replaced by SUFI2) when writing the file
+
+new_content <- param_forgoal_lhs_2 %>%
+  mutate(line = paste(param, min_value, sep = "     ")) %>%
+  pull(line)
+
+# Write the new content to model.in, replacing the existing file 
+write_lines(new_content, model_in_path)
+
+```
+
+```{r model_in}
+model_in <- read_lines(paste0(directory,"/model.in"))
+model_in ## checkinh the model.in file to start the iteration
+```
+
+## writing the extraction as a function
+
+As demonstrated earlier, we write the extraction as a function, but in this case we are not using observed.txt, but the file from the archive, which makes things slightly easier.
+
+The function below assumes that the observed data is in a list similar to "flow_df".
+If use this to run the calibration when only Flow is the observed data. Additionally, during each iteration, I save ET for all catchments and LAI for six pine catchments.
+
+###############################################################################################
+
+
+### rewrite files to start from backup to change parameters, the only parameter with relative change at the moment is CN2
+```{r, echo = T, message=FALSE, eval=T, results = "hide" }
+
+# Copy paste flies from Backup to run another iteration
+source_dir <- paste0(directory,"/Backup/")
+dest_dir <-  paste0(directory)
+
+# Get the list of files in the source directory
+files_to_copy <- list.files(source_dir, full.names = TRUE)
+
+# Copy files to the destination directory and replace them if they exist
+invisible(file.copy(files_to_copy, dest_dir, overwrite = TRUE))
+```
+
+
+
+###### Run SUFI2 with the goal file parameters generated and extract for every run flow from output.rch,  ET and LAI from output.sub.
+```{r, echo = T, message=FALSE, eval=T, results = "hide" }
+#This is resolved upstream
+####IMPORTANT COPY MODEL IN FILE INTO FOLDER + GOAL_SUB created so they have same parmeters so swat_edit can work.
+#setwd("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LCnewsoil_forR2.Sufi2.SwatCup")
+
+### This script uses LAIMODIS HiQ-LAI from Yan 2024
+# This method integrates information from multiple dimensions, including pixel quality information, spatiotemporal correlation, and the original retrieval, thereby enabling both “reprocessing” and “value-added data” with respect to the existing MODIS LAI products, leading to the development of the high-quality LAI (HiQ-LAI) dataset. Compared with ground measurements, HiQ-LAI shows better performance than the original MODIS product with a root-mean-square error (RMSE) or bias decrease from 0.87 or −0.17 to 0.78 or −0.06, respectively. This is due to the improvement of HiQ-LAI with respect to capturing the seasonality in vegetation phenology and reducing abnormal time-series fluctuations.
+# Yan, K., Wang, J., Peng, R., Yang, K., Chen, X., Yin, G., Dong, J., Weiss, M., Pu, J., and Myneni, R. B.: HiQ-LAI: a high-quality reprocessed MODIS leaf area index dataset with better spatiotemporal consistency from 2000 to 2022, Earth Syst. Sci. Data, 16, 1601–1622, https://doi.org/10.5194/essd-16-1601-2024, 2024.The 5 km 8 d HiQ-LAI datasets from 2000 to 2022.
+
+##not parallel
+require(foreach)
+library(stringr)
+#goal_sub<-goal_sub[1:2,] for testing some iterations first
+
+setwd(directory)
+
+iteration_dir<-(directory)
+save_interval <- 50 
+result <- list()
+## do this for n number of ITER, ITER=4, and each time save result, but run other .exe from SUFI2
+
+result <- foreach (i = 1:nrow(goal_sub)) %do%  #for each row in goal_sub
+{
+  
+   tryCatch({
+  # model.in
+  model_in <- read_lines(paste0(directory,"/model.in"))
+  
+  for (j in 1:length(model_in)) {
+    split_str <- str_split(model_in[j],"     ")
+    # skip 3 columns in goal_sub and put this value
+    # into second part of split string (the value)
+    split_str[[1]][2] <- goal_sub[i,j+1]
+    #convert split_str[[1]][2] to 6 decimals adding 0 if necesary
+    split_str[[1]][2] <- format(as.numeric(split_str[[1]][2]), digits=6, nsmall=6)
+    #browser()
+    # now put back together using paste
+    model_in[j] <- paste(split_str[[1]][1],
+                          split_str[[1]][2],sep="     ")
+  }
+  writeLines(model_in, paste0(directory,"/model.in"))
+  # run swat_edit
+  shell.exec(paste0(directory,"/swat_edit.exe"))
+  # Get R to wait until swat_edit.exe is ready
+  Sys.sleep(5)
+  # swat.exe but discard output on screen
+  system2("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SWAT.exe")
+#browser()
+  # stations (in order of observed.txt) to save ET simulated data
+Stations <- c("Sub3.txt","Sub4.txt",'Sub6.txt','Sub7.txt','Sub8.txt','Sub9.txt','Sub10.txt',"Sub11.txt")
+ # Stations <- c("sub3","sub4","sub6","sub7","sub8","sub9","sub10","sub11")
+  subs <- c(3,4,6,7,8,9,10,11)
+  Date_start = "2003-01-01"
+  Date_end = "2015-12-31"
+#browser()
+  # run the output_extract function
+  ET_all <- Output_extract_simET_cal (directory = iteration_dir,
+                           sub_no = subs,
+                           station_name = Stations,
+                           Date_start = Date_start, Date_end= Date_end, nsub=21)
+  ET_all <- ET_all %>%
+    mutate(iter = i)
+  
+  # stations (in order of observed.txt) to save Flow simulated data
+  Stations <- c("FLOW_OUT_11", "FLOW_OUT_12")
+  reaches <- c(11,12)
+  Date_start = "2003-01-01"
+  Date_end = "2015-12-31"
+
+  # run the output_extract function
+  flow_all <-  Output_extract_flow_cal(directory = iteration_dir,
+                             reach_no = reaches,
+                             station_name = Stations,
+                             Date_start = Date_start, Date_end=Date_end)
+  flow_all <- flow_all %>%
+    mutate(iter = i)
+  #browser()
+  ####to save LAI simulated data
+ #Stations <- c("SubLAI3","SubLAI4","SubLAI6", "SubLAI7",  "SubLAI8", "SubLAI9", 'SubLAI10','SubLAI11','SubLAI12','SubLAI13','SubLAI14','SubLAI15')
+#  hrus <- c(8, 22, 53 , 63  , 69, 75, 86,92,116, 133, 145, 167)
+  Date_start = "2003-01-01"
+  Date_end = "2015-12-31"
+ Stations <- c("sub3","sub4","sub6","sub7","sub8","sub9","sub10","sub11")
+# hru_number <- c(8,21,58,66,74,98,116,124) ## hru witch max representation in subbasin
+ sub_number <- c(3,4,6,7,8,9,10,11)
+  #  land_uses_swat_code = c('PAST','PINE','GRAS')
+#browser()
+  # run the output_extract function
+  # LAI_all <- Output_extract_simLAI_cal (directory = iteration_dir,
+  #                          hru_no = hrus,
+  #                          station_name = Stations,
+  #                          Date_start, Date_end)
+ 
+ LAI_all <-Output_extract_simLAI_cal (directory = iteration_dir,
+                       #   hru_no = hrus,
+                            station_name = Stations,sub_number = sub_number,#hru_number = hru_number,
+                             Date_start = Date_start, Date_end=Date_end)
+  
+  LAI_all2 <-   Output_extract_allhrussimLAI_cal (directory = iteration_dir,
+                         #  hru_no = hrus,
+                         station_name = Stations,sub_number = sub_number,
+                           Date_start = Date_start, Date_end=Date_end)
+ 
+   LAI_all <- LAI_all %>%
+    mutate(iter = i)
+    LAI_all2 <- LAI_all2 %>%
+    mutate(iter = i)
+    # decide how we will merge the output
+  out  <- list(ET= ET_all, flow = flow_all, LAI =  LAI_all, LAI_all2 = LAI_all2)
+   result[[i]] <- out
+  print(paste("iteration:", i))
+   # Save every 'save_interval' iterations
+    if (i %% save_interval == 0) {
+      saveRDS(result, paste0(nombre_run, "_iter_", i, ".RDS"))
+      print(paste("Saved intermediate result at iteration:", i))
+    }
+    
+  }, error = function(e) {
+    print(paste("Error at iteration", i, ":", e))
+  })
+
+  return(out)
+}
+saveRDS(result, paste0(nombre_run,".RDS")) 
+
+```
+
+```{r OF_calc, echo = T, message=FALSE, eval=T, results = "hide" }
+When the run finishes, cut and paste the nombre_run.RDS file in the folder named after the run and read from there the result. 
+#source("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/Fun7_OF_calc.R", local = knitr::knit_global())
+ nombre_run='flow4_ET_LAI4_noviembre_validation2'
+result<-readRDS(paste0(directory,'/SUFI2.IN/',nombre_run,'/',nombre_run,'_iter_500.RDS'))
+
+result_Flow_CANMX2_CAL<-result
+
+# add period
+for (i in 1:length(result_Flow_CANMX2_CAL)) {
+  if (!is.null(result_Flow_CANMX2_CAL[[i]]$flow)){
+  result[[i]]$flow <- result_Flow_CANMX2_CAL[[i]]$flow %>%
+      filter(Date >= "2003-01-01" & Date <= "2015-12-31")
+  }  }
+
+for (i in 1:length(result_Flow_CANMX2_CAL)) {
+   if (!is.null(result_Flow_CANMX2_CAL[[i]]$ET)){
+       result[[i]]$ET <- result_Flow_CANMX2_CAL[[i]]$ET %>%
+      filter(Date >= "2003-01-01" & Date <= "2015-12-31")
+} }
+
+for (i in 1:length(result_Flow_CANMX2_CAL)) {
+  if (!is.null(result_Flow_CANMX2_CAL[[i]]$LAI)){
+         result[[i]]$LAI <- result_Flow_CANMX2_CAL[[i]]$LAI %>%
+  filter(Date >= "2016-01-01" & Date <= "2019-12-31")
+         
+} }
+
+for (i in 1:length(result_Flow_CANMX2_CAL)) {
+  if (!is.null(result_Flow_CANMX2_CAL[[i]]$LAI_all2)){
+result[[i]]$LAI_all2 <- result_Flow_CANMX2_CAL[[i]]$LAI_all2 %>%
+        filter(Date >= "2003-01-01" & Date <= "2015-12-31")
+} }
+
+goal <- read_table2(str_c(directory,'SUFI2.IN',nombre_run,"goal_file.txt", sep="/"),
+                    skip=3, col_names=T)
+#
+# Initialize empty lists to store performance metrics
+performance_flow_list <- list()
+performance_ET_list <- list()
+performance_LAI_list <- list()
+
+# to avoid elements null, adding a an if here 
+# Determine the minimum length to avoid subscript out-of-bounds
+min_length <- length(result)
+
+# Loop through each element in the result list and calculate performance
+for (i in seq_along(result)) {
+
+  # Check for flow data and calculate performance if it's not NULL
+  if (!is.null(result[[i]]$flow)) {
+    performance_flow_list[[i]] <- performance_flow(result[[i]]$flow)
+  } else {
+    performance_flow_list[[i]] <-  data.frame()   # Placeholder for missing data
+    warning(paste("Flow data is NULL for index", i))
+  }
+
+  # Check for ET data and calculate performance if it's not NULL
+  if (!is.null(result[[i]]$ET)) {
+    performance_ET_list[[i]] <- performance_ET(result[[i]]$ET)
+  } else {
+    performance_ET_list[[i]] <-  data.frame()    # Placeholder for missing data
+    warning(paste("ET data is NULL for index", i))
+  }
+
+  # Check for LAI data and calculate performance if it's not NULL
+  if (!is.null(result[[i]]$LAI)) {
+    performance_LAI_list[[i]] <- performance_LAI(result[[i]]$LAI)
+  } else {
+    performance_LAI_list[[i]] <-  data.frame()   # Placeholder for missing data
+    warning(paste("LAI data is NULL for index", i))
+  }
+}
+
+# Combine the performance metrics into single data frames with an identifier column
+combined_performance_flow <- bind_rows(performance_flow_list, .id = "iter")%>%
+  mutate(metric = "flow")
+combined_performance_ET <- bind_rows(performance_ET_list, .id = "iter")%>%
+  mutate(metric = "ET")
+combined_performance_LAI <- bind_rows(performance_LAI_list, .id = "iter")%>%
+  mutate(metric = "LAI")
+
+combined_performance_all <- bind_rows(combined_performance_flow, combined_performance_ET, combined_performance_LAI)
+write_csv(combined_performance_all, paste0(directory,"/SUFI2.IN/",nombre_run,"/_performance.csv"))
+
+### save dataframes with results
+
+# divide result list into 3 dataframes
+result_ET <- map_dfr(result, 1)%>%
+  mutate(metric = "ET")
+result_flow <- map_dfr(result, 2)%>%
+  mutate(metric = "flow")
+result_LAI <- map_dfr(result, 3)%>%
+  mutate(metric = "LAI")
+                           
+```
+
+#### Model performance 
+
+```{r OF_calc, echo = T, message=FALSE, eval=T, results = "hide" }
+## Define function to read and process result file
+process_result <- function(lista) {
+  #result <- readRDS(file_path)
+  result<-lista
+  list(
+    ET = result %>% map_dfr(1),
+    Flow = result %>% map_dfr(2),
+    LAI = result %>% map_dfr(3)
+  )
+}
+
+```
+
+```{r, echo = T, message=FALSE, eval=T, results = "hide" }
+
+full_path=directory
+combined_performance_all <- read_csv(paste0(directory,'/SUFI2.IN/',nombre_run,'/_performance.csv'))%>%
+  mutate(data='non-transformed') 
+
+top_row <- assign_weights(combined_performance_all, flow_weight=1, ET_weight=1, LAI_weight=1) 
+##no weigthing in thsi example. If first step of sequential calibration is LAI then LAI=1 and others 0
+
+  OF_columns <- c("NSE", "KGE", "R2", "PBIAS", "Vol_frac", "MSE", "SSQR", "bR2")
+   process_metrics <- function(data, OF_columns) {
+  data %>%
+    group_by(metric, iter) %>%
+    # Count number of catches per metric
+    # mutate(catch_count = n()) %>%
+    # # Assign weight as 1 / catch_count; if weight is 0, the metric is not considered
+    # mutate(weight = 1 / catch_count) %>%
+    # Calculate weighted values for each OF column
+    mutate(across(all_of(OF_columns), ~ . * weight)) %>%
+    ungroup() %>%
+    group_by(metric, iter) %>%
+    # Summarise to get the sum of weighted values
+    summarise(across(all_of(OF_columns), sum, na.rm = TRUE)) %>%
+    ungroup()
+}
+
+   ## sum by iteration by metric (weigths are considered)
+top_row_individual_sum<-process_metrics(top_row, OF_columns)%>%
+  # group_by(iter,metric) %>%
+  # summarise(across(all_of(OF_columns), sum, na.rm = TRUE)) %>%
+  # ungroup()%>%
+  mutate(met='individual_by_metric')
+
+
+## testing plot towrow perfomance
+##testing performance by catch
+
+```
+
+```{r}
+
+## Now best simulation was identified using weigthed OF, now parameetrs from best sim are used to calculate new ranges (new parameters) for next iteration. Beh calculations are not generated at this stage.
+
+####### find_best_iteration_dist 
+find_best_iteration_dist <- function(data, metrics, OF) {
+  filtered_df <- list()  # Initialize an empty list to store filtered data
+
+  # Loop through each metric in the metrics vector
+  for (i in metrics) {
+    # Filter data based on the current metric
+    data_m <- data %>%
+      filter(metric == i) %>%
+      # Arrange by the OF value and select the top 340 rows
+      arrange(desc(.data[[OF]])) %>%
+    # slice(1:340) ## can I use cealing here?
+      slice(1:ceiling(n() * 0.68))  # Select the top 50% of the data
+
+    # Store the filtered data in the list, using the metric as the list index
+    filtered_df[[i]] <- data_m
+  }
+
+  return(filtered_df)  # Return the list of filtered data frames
+}
+
+```
+
+```{r}
+
+##This is to do an exploration when weigthing is 1 for every variable (independantly calculated) to see the iteration that shared and was not used in the paper.
+performance_all_weigthed_ind <- find_best_iteration_dist(top_row_individual_sum , metrics=c('flow','ET','LAI'), OF='KGE')
+
+### convert list to datafrmae filtered_df 
+performance_all_weigthed_ind <- do.call(rbind, performance_all_weigthed_ind)
+
+performance_all_weigthed_ind_itertaions<-performance_all_weigthed_ind%>% 
+ # iter    : chr [1:669] "135" "286" "385" "197" .
+  ##iter should be number
+  mutate(iter=as.numeric(iter))%>%
+###extract iter for each metric and select only iters that are in three metrics
+  group_by(iter)%>%
+  filter(n() == 3)%>%  # Keep only iterations that appear in all three metrics
+  ungroup()
+best_simulations<-unique(performance_all_weigthed_ind_itertaions$iter)
+### count unique values
+print(paste0('NUmber of best iterations shared by metrics:',length(unique(performance_all_weigthed_ind_itertaions$iter))))
+
+# Mark the iterations as "Shared" or "Not Shared"
+performance_all_weigthed_ind_cat <- performance_all_weigthed_ind %>%
+  mutate(shared = ifelse(iter %in% best_simulations, "shared", "only one metric"))
+
+# Create a plot to differentiate iterations
+ggplot(performance_all_weigthed_ind_cat , aes(x = iter, y = KGE, color = metric, shape = shared)) +
+  geom_point(alpha = 0.7, size = 2) +  # Use points with transparency and size
+  scale_shape_manual(values = c("shared" = 16, "only one metric" = 17)) +  # Shapes: different shapes for clarity
+  theme_bw() +
+  facet_wrap(~metric, ncol = 1,  scales = "free_y" ) +  # Facet by metric
+  labs(color = "Iteration Type", shape = "Iteration Type", x = "Iteration", y = "NSE") 
+
+
+### make histogram distribution of the NSE for flow, ET and LAI
+ggplot(performance_all_weigthed_ind_cat, aes(x = KGE, fill = shared), alpha = 0.2) +
+    geom_histogram(binwidth = 0.1, position = "dodge") +
+    labs(title = "Distribution of NSE values by metric", x = "NSE", y = "Frequency") +
+    theme_bw() +
+    facet_wrap(~metric, scales = "free_y", ncol = 1)
+
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/KGE_distribution.png'))
+
+# ggplot(performance_all_weigthed_ind_cat, aes(x = iter, y= NSE),alpha=0.2) +
+#   geom_histogram(binwidth = 0.1, position = "dodge") +
+#   theme_bw()+facet_wrap(~metric,ncol=1)
+
+ggplot(performance_all_weigthed_ind_itertaions%>%
+         arrange(iter), aes(x = iter, y = KGE, fill = metric)) +
+  geom_bar(stat = "identity", position = "dodge") +  # Use 'identity' to plot actual NSE values
+  labs(title = "NSE values by Iteration and Metric", x = "Iteration", y = "NSE") +
+  theme_bw() +
+  facet_wrap(~metric, scales = "free_y",ncol=1) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/KGEE_by_iteration.png'))
+
+
+
+### if goal is not written , write goal file of iteration:
+## use first column from goal (no header) as reference for iter in the combined dataset
+goal_head <- read_table2(paste0(directory,"/SUFI2.IN/",nombre_run, "/goal_file.txt"), skip=3, col_names=T)
+# Read the first 3 lines as header (without loading it into a dataframe)
+goal_header <- read_lines(paste0(directory,"/SUFI2.IN/",nombre_run, "/goal_file.txt"))
+
+output_path <- file.path(paste0(directory,"/SUFI2.IN/",nombre_run, paste0("/goal_",nombre_run,"metrics.txt")))
+
+############### I am using ONLY ONE METRIC in a one step or multi step wise calibration
+################### Change the metric below before running !!! @@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+performance_all_weigthed_ind_itertaions <- top_row_t_individual_sum%>% #, metrics=c('flow','ET','LAI'), OF='NSE')
+filter(metric =='flow')  ## THIS NEEDS TO BE CHANGED ACCORDINGLY
+
+# goal <- read_table2(str_c(full_path,'SUFI2.IN',nombre_run,"goal_file.txt", sep="/"),
+#                     skip=3, col_names=T)
+## rigth join goal with results of top_row_t_individual_sum
+goal_with_OF_indgoal <- goal %>%
+  right_join(
+    performance_all_weigthed_ind_itertaions %>%
+      rename(goal_value = KGE) %>%
+      mutate(iter=as.numeric(iter))%>%
+      select(iter, goal_value,metric),
+    by = c("Sim_No." = "iter") ### inlcude metric in the join
+  )
+
+write_lines(goal_header, output_path)
+# Append the modified data after the header
+write_delim(goal_with_OF_indgoal, 
+            path = output_path, 
+            delim = "\t", 
+            col_names = TRUE, 
+            append = TRUE)
+
+
+### find  goal_with_OF_indgoal
+###plot goal_value by metric from goal_with_OF_indgoal
+ggplot(goal_with_OF_indgoal, aes(x = Sim_No., y = goal_value, color = metric)) +
+  geom_point() +
+  labs(title = "iteration selected goal values", x = "Iteration", y = "Goal Value") +
+  theme_minimal() +
+  #facet_wrap(~metric, scales = "free_y",ncol=1) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels
+##now we have the best iteration for each metric
+##but we need to find the best iterations considering the parameter ranges overlap
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/KGE_by_iterationpoints.png'))
+
+
+## take output combined_performance_all_weigthed  withed metric column and bind it to goal BY ITER
+
+```
+
+
+
+```{r}
+
+goal_long <- goal_with_OF_indgoal %>%
+  pivot_longer(cols = -c(Sim_No.,metric,goal_value)) %>%
+  mutate(
+    parameter_name = case_when(
+      str_detect(name, "\\{") ~ str_extract(name, "(?<=v__|r__)[^\\{]+"),
+      TRUE ~ str_extract(name, "(?<=__).+?(?=__)")
+    ),
+    land_type = case_when(
+      str_detect(name, "\\{144\\}") ~ "PINE",
+      str_detect(name, "\\{12\\}") ~ "PAST",
+      TRUE ~ str_extract(name, "PINE|PAST|GRAS")
+    )
+  )%>%
+  group_by(parameter_name)%>%
+  mutate(param_cat= case_when(
+    max(value) > 100 ~ "High",
+    max(value) >= 2 ~ "Low",
+    max(value) < 2 ~ "Very Low")
+  )
+
+plot_high <- ggplot(goal_long %>%
+                      filter(param_cat == "High" & land_type %in% c('PINE', 'PAST')), 
+                    aes(x = parameter_name, y = value, fill = land_type)) +
+  geom_boxplot(outlier.shape = NA) + # Hide outliers
+  theme_bw() + # Use a clean white background
+  labs(title = "",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x-axis labels
+  scale_fill_manual(values = c("PINE" = "forestgreen", "PAST" = "goldenrod")) + # Custom colors
+  facet_wrap(~land_type, scales = "fixed") # Facet by land_type
+
+plot_medium <- ggplot(goal_long %>%
+                        filter(param_cat == "Low" & land_type %in% c('PINE', 'PAST')), 
+                      aes(x = parameter_name, y = value, fill = land_type)) +
+  geom_boxplot(outlier.shape = NA) + # Hide outliers
+  theme_bw() + # Use a clean white background
+  labs(title = "",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x-axis labels
+  scale_fill_manual(values = c("PINE" = "forestgreen", "PAST" = "goldenrod")) + # Custom colors
+  facet_wrap(~land_type, scales = "fixed") # Facet by land_type
+
+plot_low <- ggplot(goal_long %>%
+                     filter(param_cat == "Very Low" & land_type %in% c('PINE', 'PAST')), 
+                   aes(x = parameter_name, y = value, fill = land_type)) +
+  geom_boxplot(outlier.shape = NA) + # Hide outliers
+  theme_bw() + # Use a clean white background
+  labs(title = "",
+       x = "Parameter",
+       y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x-axis labels
+  scale_fill_manual(values = c("PINE" = "forestgreen", "PAST" = "goldenrod")) + # Custom colors
+  facet_wrap(~land_type, scales = "fixed") # Facet by land_type
+
+# combined_plot <- (plot_low / plot_medium / plot_high) +
+#   plot_layout(guides = 'collect') + # Collect legends into a single guide
+#   plot_annotation(title = "Distribution of parameters by land use in the sensitivty analysis") # Title for the combined plot
+
+#combined_plot
+# ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/sensitivity_analysis5.png"), plot = combined_plot, width = 10, height = 7, units = "in", dpi = 500)
+
+# Save individual plots
+ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/plot_low.png"), plot = plot_low, width = 8, height = 6)
+ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/plot_medium.png"), plot = plot_medium, width = 8, height = 6)
+#ggsave(paste0(directory,"/SUFI2.IN/",nombre_run,"/plot_high.png"), plot = plot_high, width = 8, height = 6)
+```
+
+## Now best sim was identified, now parameetrs from best sim are used to calculate new ranges (new parameters) for next iteration. Beh calculations are not generated at this stage.
+
+```{r}
+################### Change the metric below before running !!! @@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+## use goal_with_OF to identify th best simulation parameter for that metric
+# Calculate the best_sim_no and best_goal
+## this is to create a new goal file as it was generated by SUFI2 after all iterations. I am not getting the write formet, or either other files are missing, so i am not using new_pars.exe from SUFI2, I am calculating this externally.
+### I am now finding parameters for all the selected simulations, and then I will calculate the sensitivity matrix and covariance matrix to find the new parameter ranges
+
+# Extract the simulation numbers using parameters from goal file. The previous check made sure they were correspondent
+best_sims <- goal_with_OF_indgoal %>%  ### best_sim ONLY FOR flow  MAX KGE not NSE AND TH BEST, 
+  filter(metric == 'flow') %>%  ### CHANGE METRIC ACCORDINGLY
+  arrange(desc(goal_value)) %>%
+  slice(1) 
+ 
+best_sims_unique<-best_sims%>%
+distinct(Sim_No., .keep_all = TRUE) ### selecting NSE flow for analysis covariance
+
+#### max for each metric whihc I am not using at the moment as it is only one metric
+best_sims_number <- best_sims %>%
+  group_by(metric) %>%
+  filter(goal_value == max(goal_value)) %>%
+  ungroup() 
+best_sims_number_n<-best_sims_number$Sim_No.
+
+# ggplot(best_sims, aes(x = metric, y = goal_value, fill = metric)) +
+#   geom_boxplot() +
+#   labs(x = "Metric", y = "Goal Value", title = "NSE best sims 0.68") +
+#   theme_minimal()
+
+# Extract the simulation numbers of the top simulations
+##save table 
+write_csv(best_sims, paste0(directory,'/SUFI2.IN/',nombre_run,'/',nombre_run, '_best_simulation1.csv'))
+write_csv(best_sims_number, paste0(directory,'/SUFI2.IN/',nombre_run,'/',nombre_run, '_best_simulation1_top.csv'))
+## create a table with parameters and recalculate ranges
+##
+#  Sensitivity Matrix Calculation
+## I will try to adjust this steps for multiple best simualtions
+#
+n_sim <- nrow(goal_with_OF_indgoal)  # Number of simulations
+#
+# # Extract the parameter matrix for the top simulations
+goal_with_OF_matrix <- goal_with_OF_indgoal %>% select(-c("Sim_No." , goal_value,metric,"1:v__CANMX.hru______PINE"))
+ best_sims_unique<- goal_with_OF_indgoal %>% select(-c("Sim_No.",metric ,goal_value,metric,"1:v__CANMX.hru______PINE"))
+#
+# #### option to use Z-Score standarization function
+# z_score_scaling <- function(x) {
+#   (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+# }
+# goal_with_OF_matrix_scaled <- goal_with_OF_matrix %>%
+#   mutate(across(everything(), z_score_scaling))
+#
+# # Use the scaled parameters for the rest of the analysis
+# goal_with_OF_matrix<-goal_with_OF_matrix_scaled
+#
+# Extract the objective function values for the top simulations
+#g_values <- goal_with_OF_indgoal$goal_value
+n_params <- ncol(na.omit(goal_with_OF_matrix)) # Number of parameters
+
+# # Update the number of rows for the sensitivity matrix
+ num_rows_J_top <- choose(n_sim, 2)
+
+# # Fill the J matrix with differences between the top simulations
+# # Initialize an empty matrix for J
+J <- matrix(0, nrow = num_rows_J_top , ncol = n_params)
+
+# Fill the sensitivity matrix J
+index <- 1
+for (i in 1:(n_sim - 1)) {
+    for (k in (i + 1):n_sim) {
+        # Differences in the objective function
+        delta_g <-  goal_with_OF_indgoal$goal_value[k] -goal_with_OF_indgoal$goal_value[i]
+
+        # Differences in the parameters
+        params_i <- as.numeric(goal_with_OF_matrix[i, ])
+        params_k <- as.numeric(goal_with_OF_matrix[k, ])
+        delta_b <- params_k - params_i
+
+        # Debugguin error and adding goal_with_OF_matrix as consequence
+        #print(paste("i:", i, "k:", k))
+       # print(paste("Delta g:", delta_g))
+       # print(paste("Params i:", paste(params_i, collapse=", ")))
+       # print(paste("Params k:", paste(params_k, collapse=", ")))
+      #  print(paste("Delta b:", paste(delta_b, collapse=", ")))
+
+        # Ensure no division by zero
+       # if (any(is.infinite(delta_g)) || any(delta_b == 0)) {
+       #      J[index, ] <- NA  # Handle cases where delta_b is zero or delta_g is infinite
+        #} else {
+            J[index, ] <- ifelse(is.finite(delta_g / delta_b), delta_g / delta_b, NA)
+      #  }
+
+        index <- index + 1
+    }
+}
+
+# # Compute the sensitivity matrix of the objective function to understand how changes in parameters affect the objective function.
+# # Covariance and Correlation Analysis
+# # The sensitivity matrix J is now ready...then:
+
+# # Covariance and Correlation Analysis. To calculate the Hessian matrix using the Gauss–Newton method, you need to compute h= jtRANSPOSE.J
+# # Compute the transpose of J
+ J[is.na(J)] <- 0
+# #J_T[is.na(J_T)] <- 0
+#
+J_T <- t(J)
+#
+# # Compute the Hessian matrix H using J_T %*% J
+ H <- J_T %*% J  #%*% performs matrix multiplication
+#
+# ### Now Calculate the Variance of the Objective Function Values. The variance of the objective function values is calculated as the variance of the differences between the objective function values and the average objective function value.
+ sigma_g2 <- var(goal_with_OF_indgoal$goal_value)
+#
+# # now Calculate the covariance matrix
+ C <- sigma_g2 * solve(H)   # as it is JT.J -1, this means inversion, solve() function to compute the inverse of a matrix.
+#
+#  ##  IMPORTANT #A square matrix is non-invertible (singular) if the number of columns are greater than the number of linear independent rows
+#
+# ## Estimate the lower bound of the parameter covariance matrix C and calculate standard deviations and confidence intervals for parameters.
+# ##The standard deviation for parameter bj is the square root of the diagonal element of the covariance matrix C
+#
+# # Standard deviation for parameter j using diagonal elements of C
+ s_j <- sqrt(diag(C))
+#
+# ###take care ofposition 21 is CANMX, this parameter was eliminated from J as makes H solve not possible Error in solve.default(H) :   Lapack routine dgesv: system is exactly singular: U[21,21] = 0
+ s_j_with_zero <- append(0, s_j)
+# ## add name of parameter to s_j
+#
+ s_j_list<-as.data.frame(s_j_with_zero)
+ s_j_list$Parameter_Name<-colnames(goal_with_OF_indgoal  %>% select(-c("Sim_No.", goal_value,metric)))
+#
+ s_j_vector <- s_j_list$ s_j_with_zero
+ 
+# 95% Confidence Interval
+#  Estimate the lower bound of the parameter covariance matrix C and calculate standard deviations and confidence intervals for parameters.
+# Parameter correlations are assessed to identify interactions between parameters.
+#  Uncertainty Measures Assess the 95% prediction uncertainties (95PPU) by calculating the percentage of observed data bracketed by the uncertainty band and the average distance between the upper and lower 95PPU (d-factor).
+#
+# Degrees of freedom
+ df <- n_sim - n_params
+#
+# # Critical t-value for 95% confidence interval. This step is correct for calculating the 95% confidence intervals using the t-distribution.  This is the critical value from the t-distribution with the degrees of freedom for a significance level of 0.025, where the upper bound corresponds to a probability of 0.025 in one tail).
+# #https://www.itl.nist.gov/div898/handbook/eda/section3/eda3672.htm#:~:text=t1%2D%CE%B1%2C%CE%BD%20%3D,with%2010%20degrees%20of%20freedom.
+t_critical <- qt(0.975, df) # 0.975 for 95% confidence level
+#
+# # Extract parameters for each best simulation using same parameters set used for sensitivity matrix calculation
+#
+# # Calculate lower confidence bounds
+ parameter_names <- colnames(goal_with_OF_matrix)#colnames(goal_with_OF_indgoal )
+# # Reorder Just in case,  s_j based on the parameter names of b_best_list
+ s_j_ordered <- s_j_list %>%
+   filter(Parameter_Name %in% parameter_names) %>%  # Filter to ensure matching parameter names
+  arrange(match(Parameter_Name, parameter_names))  # Reorder s_j to match parameter names in b_best_list
+#
+# # Extract standard deviations in the correct order
+ s_j_vector <- s_j_ordered$s_j_with_zero
+#
+# # Apply t_critical to the standard deviations
+ s_j_t_critical <- t_critical * s_j_vector
+#
+# # Subtract and add the t_critical * standard deviations for each parameter
+ b_lower <- sweep(best_sims_unique , 2, s_j_t_critical, FUN = "-")  # trying sweep to apply this in order as now I have list of best sim
+ b_upper <- sweep(best_sims_unique , 2, s_j_t_critical, FUN = "+")
+#
+# ####unscale
+#
+ intervals<-bind_rows(b_lower, b_upper)
+#
+#
+initial_ranges<-goal_with_OF_indgoal%>%
+  select(-c(Sim_No.,metric,goal_value))%>%
+  pivot_longer(everything(), names_to = "Parameter", values_to = "Value")%>%
+  group_by(Parameter) %>%
+  summarise(
+    Min = min(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE)
+  )
+
+combined_data_median <- determine_newrange (
+  data = goal_with_OF_indgoal%>%
+    select(-c(Sim_No.,metric)),
+  s_j = s_j,
+  params_matrix = goal_with_OF_matrix,
+  initial_ranges = initial_ranges,
+  t_critical = t_critical,
+  choice = "best"  # Can switch to 'best' for best parameters
+)
+
+confidence_intervals_final <- calculate_param_bounds(
+  confidence_intervals =combined_data_median ,  ###lets use all best sim overlay 201
+  goal = goal_with_OF_indgoal)%>%
+  mutate(category = case_when(
+    param_max < 1 ~ "one",
+    param_max < 5 ~ "two",
+    param_max < 100 ~ "three",
+    TRUE ~ "High"
+  ))
+#
+best_simulations_range<-confidence_intervals_final%>%
+  select(Parameter,b_j_min,b_j_max)%>%
+  rename(Parameter_Name = Parameter, par_lower = b_j_min, par_upper =b_j_max)
+
+# Create parameter data frame using mean and selected intervals
+# new_parameter_data <- mean_best_simulations %>%
+#   pivot_longer(everything(), names_to = "Parameter_Name", values_to = "mean_value") %>%
+#   left_join(select_intervals_w, by = "Parameter_Name") %>%
+#   select(Parameter_Name, mean_value, b_lower, b_upper)
+
+## write  select_intervals_w as new parameter dataset using par inf format
+# addd this header
+#51  : Number of Parameters (the program only reads the first 12 parameters or any number indicated here)
+# #            500  : number of simulations
+# v__CANMX.hru______PINE	2	2
+```
+
+```{r}
+## calculate D factor, then plot 95PPU and calculate r and p factor
+# divide result list into 3 dataframes
+# result<-readRDS('C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/best_LAI10_fglaimxch/best_LAI10_fglaimxch.RDS')
+
+# result<-readRDS("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/4_flow_graspast_noviembre_val2/4_flow_graspast_noviembre_val2_iter_500.RDS")
+# nombre_run="4_flow_graspast_noviembre_val2"
+# best_sims_number_n=481
+# 
+# 
+# result<- readRDS("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/4_contrah_10LAI_mat_flow_november_validation2/4_contrah_10LAI_mat_flow_november_validation2_iter_500.RDS")
+# nombre_run="4_contrah_10LAI_mat_flow_november_validation2"
+# best_sims_number_n=62
+# 
+# 
+# result<- readRDS("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/flow4_ET_LAI4_noviembre_validation2/flow4_ET_LAI4_noviembre_validation2_iter_500.RDS")
+# nombre_run="flow4_ET_LAI4_noviembre_validation2"
+# best_sims_number_n=131
+# 
+
+```
+
+```{r}
+result_ET <- map_dfr(result, 1)%>%
+  mutate(metric = "ET")
+result_flow <- map_dfr(result, 2)%>%
+  mutate(metric = "flow")
+result_LAI <- map_dfr(result, 3)%>%
+  mutate(metric = "LAI")
+
+## calculate BHE 
+## select one observed, the best sim and the beh
+
+Best_Sim<-result_flow%>%
+  filter(iter==best_sims_number_n)
+
+flow1<-result_flow  %>% ##Flow.x is observed 
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( Flow.y ,probs=0.975,na.rm=T),
+            L95PPU= quantile( Flow.y ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()
+# 
+# ##extract number of simulated points, (number of rows in Date 
+one_run<-result_flow%>%
+  filter(catch == "FLOW_OUT_11", iter == 1)  # Select one run for the calculation
+
+k <- nrow(one_run)
+
+# Compute d factor
+# Calculate the average distance (D-factor) between the upper and lower 95PPU
+# d_X = sum(flow1$diff, na.rm = TRUE) * (1 / k)
+#
+# flow_y_std <- sd(flow1$Flow.y, na.rm = TRUE)
+# d_factor <- d_X / flow_y_std
+d_factor_flow <- flow1 %>%
+  group_by(catch) %>%
+  summarise(diff_=sum(diff,na.rm = TRUE),
+    k = k,  # Number of observed points
+    std_dev = sd(Flow.y, na.rm = TRUE),
+    d_factor = (diff_ * (1 / k)) / std_dev
+  )
+
+#The best outcome is that 100% of the measurements are bracketed by the 95PPU, and d is close to zero.
+
+flow1_plot<- ggplot() + geom_line(data= Best_Sim, aes(Date,Flow.y, colour = "Best Simulation")) +
+  geom_line(data= flow1 ,aes(Date, Flow.x, colour = "Observed")) +
+  geom_ribbon(data= flow1, aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol=1)
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/flow1_plot.png'), plot = flow1_plot,width = 12, height = 10)
+
+
+```
+
+
+```{r}
+## calculate D factor, then plot 95PPU and calculate r and p factor for LAI
+
+Best_Sim<-result_LAI%>%
+  filter(iter==best_sims_number_n)
+
+LAI1<-result_LAI  %>% ##Flow.x is observed 
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( LAI.x ,probs=0.975,na.rm=T),
+            L95PPU= quantile( LAI.x ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()
+
+##extract number of simulated points, (number of rows in Date 
+one_run<-result_LAI%>%
+  filter(catch == "sub3", iter == 1)  # Select one run for the calculation
+
+k <- nrow(one_run)
+
+# Compute d factor
+# Calculate the average distance (D-factor) between the upper and lower 95PPU
+
+d_factor_LAI<- LAI1 %>%
+  group_by(catch) %>%
+  summarise(diff_=sum(diff,na.rm = TRUE),
+    k = k,  # Number of observed points
+    std_dev = sd(LAI.x, na.rm = TRUE),
+    d_factor = (diff_ * (1 / k)) / std_dev
+  )
+
+
+##LAI.x is predicted
+
+LAI1_plot1<- ggplot() + geom_line(data= na.omit(Best_Sim), aes(Date,LAI.x, colour = "Best Simulation")) +
+  geom_line(data= na.omit(LAI1) ,aes(Date, LAI.y, colour = "Observed")) +
+  geom_ribbon(data= na.omit(LAI1), aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol = 2)
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/LAI1_plot1.png'), plot = LAI1_plot1,width = 12, height = 10)
+
+```
+
+
+```{r}
+## plot HRU for PINE, GRAS and PAST
+
+# ## map LAI2
+LAI2_hru<-result  %>%
+  map_dfr(4)
+
+Best_Sim<-LAI2_hru%>%
+  filter(iter==best_sims_number_n)%>%
+  mutate(catch=
+  case_when(
+    SUB== 3 ~ "sub3",
+    SUB == 4 ~ "sub4",
+    SUB == 6 ~ "sub6",
+   SUB == 7 ~ "sub7",
+   SUB== 8 ~ "sub8",
+      SUB == 9 ~ "sub9",
+        SUB== 10 ~ "sub10",
+        SUB == 11 ~ "sub11"
+  ))%>%
+  select(-c(SUB,Subbasin))%>%
+  filter(catch %in% c("sub4","sub8"))
+
+LAI1<-result_LAI  %>% ##Flow.x is observed 
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( LAI.x ,probs=0.975,na.rm=T),
+            L95PPU= quantile( LAI.x ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()%>%
+  select(-SUB)
+
+
+## bind rows to plot
+LAI_all_plot<-left_join( Best_Sim,LAI1)
+
+##LAI.x is predicted
+#The best outcome is that 100% of the measurements are bracketed by the 95PPU, and d is close to zero.
+LAI_all_plot2<-LAI_all_plot
+LAI1_plot2<- ggplot() + geom_line(data= LAI_all_plot #%>%
+                                   # filter(catch %in% c("sub4","sub8"))
+                                  , aes(Date,LAI, colour = as.factor(HRU)),linewidth = 0.6,alpha = 0.4) +
+ # geom_line(data= LAI_all_plot2
+                                    #filter(LandUse== 'PINE')
+                                #  , aes(Date,LAI, colour = LandUse),linewidth = 0.5) +
+  geom_line(data= LAI_all_plot ,aes(Date, LAI.y, colour = "Observed"),linewidth = 0.8) +
+  geom_ribbon(data= LAI_all_plot, aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.2)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+ theme_bw() + 
+ #  
+ #  scale_color_manual(name='Legend',
+ #                     breaks=c('Best Simulation','Observed', '95PPU'),
+ #                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  interaction(LandUse,catch), ncol = 1)#+
+  #theme(legend.position = "bottom")
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/LAI1_plot2_hru2_6LAI.png'), plot = LAI1_plot2,width = 12, height = 10)
+
+```
+
+
+```{r}
+## calculate D factor, then plot 95PPU and calculate r and p factor for LAI
+
+Best_Sim<-result_ET%>%
+  filter(iter==best_sims_number_n)
+
+ET1<-result_ET  %>% ##Flow.x is observed 
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( ET.x ,probs=0.975,na.rm=T),
+            L95PPU= quantile( ET.x ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()
+
+##extract number of simulated points, (number of rows in Date 
+one_run<-result_ET%>%
+  filter(catch == "Sub3.txt", iter == 1)  # Select one run for the calculation
+
+k <- 156
+
+# Compute d factor
+d_factor_ET<- ET1 %>%
+  group_by(catch) %>%
+  summarise(diff_=sum(diff,na.rm = TRUE),
+    k = k,  # Number of observed points
+    std_dev = sd(ET.x, na.rm = TRUE),
+    d_factor = (diff_ * (1 / k)) / std_dev
+  )
+
+
+##ET.x is predicted
+#The best outcome is that 100% of the measurements are bracketed by the 95PPU, and d is close to zero.
+
+ET1_plot<- ggplot() + geom_line(data= Best_Sim, aes(Date,ET.x, colour = "Best Simulation")) +
+  geom_line(data= ET1 ,aes(Date, ET.y, colour = "Observed")) +
+  geom_ribbon(data= ET1, aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol = 3)
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/ET1_plot2.png'), plot = ET1_plot,width = 10, height = 5)
+
+```
+
+
+
+
+```{r}
+
+result_ET <- map_dfr(result, 1)%>%
+  mutate(metric = "ET")
+result_flow <- map_dfr(result, 2)%>%
+  mutate(metric = "flow")
+result_LAI <- map_dfr(result, 3)%>%
+  mutate(metric = "LAI")
+
+## calculate BHE 
+## select one observed, the best sim and the beh
+
+Best_Sim<-result_flow%>%
+  filter(iter==best_sims_number_n)%>%
+  mutate(catch = case_when(
+    catch == "FLOW_OUT_11" ~ "Outlet_D2",
+    catch == "FLOW_OUT_12" ~ "Outlet_D1"
+  ))
+
+flow1<-result_flow  %>% ##Flow.x is observed 
+  mutate(catch = case_when(
+    catch == "FLOW_OUT_11" ~ "Outlet_D2",
+    catch == "FLOW_OUT_12" ~ "Outlet_D1"
+  ))%>%
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( Flow.y ,probs=0.975,na.rm=T),
+            L95PPU= quantile( Flow.y ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()
+
+Best_Sim <- Best_Sim %>%
+  mutate(catch = factor(catch, levels = c("Outlet_D2", "Outlet_D1")))
+
+#################################### PLOTS ##########################################
+flow1_plotplot<- ggplot() + geom_line(data= Best_Sim, aes(Date,Flow.y, colour = "Best Simulation")) +
+  geom_line(data= flow1 ,aes(Date, Flow.x, colour = "Observed")) +
+  geom_ribbon(data= flow1, aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol=2)+
+  labs(
+    x = "Date" ,  # Change to your desired label
+    y = "Streamflow (cms)"  # Change to your desired label
+  )+
+  theme(
+    text = element_text(size = 25),        # Global text size
+    axis.title = element_text(size = 20),  # Axis title text size
+    axis.text = element_text(size = 25),   # Axis text size
+    legend.title = element_text(size = 20), # Legend title text size
+    legend.text = element_text(size = 25),  # Legend items text size
+    strip.text = element_text(size = 20)   # Facet label text size
+  )+ geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black")
+
+
+flow1_plotplot_PINE<- ggplot() + geom_line(data= Best_Sim%>%
+filter(catch=="Outlet_D2"), aes(Date,Flow.y, colour = "Best Simulation")) +
+  geom_line(data= flow1%>%
+filter(catch=="Outlet_D2") ,aes(Date, Flow.x, colour = "Observed")) +
+  geom_ribbon(data= flow1%>%
+filter(catch=="Outlet_D2"), aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol=2)+
+  labs(
+    x = "Date" ,  # Change to your desired label
+    y = "Streamflow (cms)"  # Change to your desired label
+  )+
+  theme(
+    text = element_text(size = 25),        
+    axis.title = element_text(size = 20),  
+    axis.text = element_text(size = 25),   
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 25), 
+    strip.text = element_text(size = 20)  
+  )+ geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black")
+
+
+print(flow1_plotplot)
+
+#S1_flow<-flow1_plotplot_PINE
+#S2_flow<-flow1_plotplot_PINE
+#S3_flow<-flow1_plotplot_PINE
+```
+
+
+```{r}
+## calculate D factor, then plot 95PPU and calculate r and p factor for LAI
+
+Best_Sim<-result_LAI%>%
+  filter(iter==best_sims_number_n)%>%
+  filter(catch == c("sub4","sub8"))%>%
+  mutate(catch = case_when(
+    catch == "sub4" ~ "Sub4_D2",
+    catch == "sub8" ~ "Sub8_D1"
+  ))
+
+LAI1<-result_LAI  %>% ##Flow.x is observed 
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( LAI.x ,probs=0.975,na.rm=T),
+            L95PPU= quantile( LAI.x ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()%>%
+  filter(catch == c("sub4","sub8"))%>%
+  mutate(catch = case_when(
+    catch == "sub4" ~ "Sub4_D2",
+    catch == "sub8" ~ "Sub8_D1"
+  ))
+
+
+##LAI.x is predicted
+
+LAI1_plot1plot<- ggplot() + geom_line(data= na.omit(Best_Sim), aes(Date,LAI.x, colour = "Best Simulation")) +
+  geom_line(data= na.omit(LAI1) ,aes(Date, LAI.y, colour = "Observed")) +
+  geom_ribbon(data= na.omit(LAI1), aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol = 2)+
+  labs(
+    x = "Date" ,  # Change to your desired label
+    y = "LAI (m2/m2)"   # Change to your desired label
+  )+
+  theme(
+    text = element_text(size = 25),       
+    axis.title = element_text(size = 20),  
+    axis.text = element_text(size = 25),  
+    legend.title = element_text(size = 20), 
+    legend.text = element_text(size = 25), 
+    strip.text = element_text(size = 20)  
+  )+ geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black")
+
+
+LAI1_plot1plot_PINE<- ggplot() + geom_line(data= na.omit(Best_Sim%>%
+                                                           filter(catch=="Sub4_D2")), aes(Date,LAI.x, colour = "Best Simulation")) +
+  geom_line(data= na.omit(LAI1%>%
+                            filter(catch=="Sub4_D2")) ,aes(Date, LAI.y, colour = "Observed")) +
+  geom_ribbon(data= na.omit(LAI1%>%
+                            filter(catch=="Sub4_D2")), aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol = 2)+
+  labs(
+    x = "Date" ,  # Change to your desired label
+    y = "LAI (m2/m2)"   # Change to your desired label
+  )+
+  theme(
+    text = element_text(size = 25),        # Global text size
+    axis.title = element_text(size = 20),  # Axis title text size
+    axis.text = element_text(size = 25),   # Axis text size
+    legend.title = element_text(size = 20), # Legend title text size
+    legend.text = element_text(size = 25),  # Legend items text size
+    strip.text = element_text(size = 20)   # Facet label text size
+  )+ geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black")
+
+
+
+LAI2_hru<-result  %>%
+  map_dfr(4)
+# result_LAI<-readRDS("C:/Users/Lenovo/Documents/Calib y Valid La Corona Sydney/LCnewsoil/exorty/LC_newsoil_newdelim.Sufi2.SwatCup/SUFI2.IN/6_LAI_transf500_parf_addbiomin_toptpaslow_laiup/6_LAI_transf500_parf_addbiomin_toptpaslow_laiupdetrend_LAI_list_renamed.RDS")
+
+Best_Sim<-LAI2_hru%>%
+  filter(iter==best_sims_number_n)%>%
+  mutate(catch=
+  case_when(
+    SUB== 3 ~ "sub3",
+    SUB == 4 ~ "sub4",
+    SUB == 6 ~ "sub6",
+   SUB == 7 ~ "sub7",
+   SUB== 8 ~ "sub8",
+      SUB == 9 ~ "sub9",
+        SUB== 10 ~ "sub10",
+        SUB == 11 ~ "sub11"
+  ))%>%
+  select(-c(SUB,Subbasin))%>%
+  filter(catch %in% c("sub4","sub8"))%>%
+  mutate(catch = case_when(
+    catch == "sub4" ~ "Sub4_D2",
+    catch == "sub8" ~ "Sub8_D1"
+  ))
+
+LAI1<-result_LAI  %>% ##Flow.x is observed 
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( LAI.x ,probs=0.975,na.rm=T),
+            L95PPU= quantile( LAI.x ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()%>%
+  select(-SUB)%>%
+  filter(catch == c("sub4","sub8"))%>%
+  mutate(catch = case_when(
+    catch == "sub4" ~ "Sub4_D2",
+    catch == "sub8" ~ "Sub8_D1"
+  ))
+
+# 
+# ##read observed data
+library(readxl)
+LAI_Obs_Pinus <- read_excel("~/LAI_Obs_Pinus_last.xlsx")%>%
+  mutate(Date = as.Date(Date))
+##pivot longer to plot
+LAI_Obs_Pinus_plot<-pivot_longer(LAI_Obs_Pinus,cols = c(2:7),names_to = "Site",values_to = "LAI")%>%
+  mutate(catch= "sub4",LandUse = "PINE")%>%
+  mutate(catch = case_when(
+    catch == "sub4" ~ "Sub4_D2",
+    catch == "sub8" ~ "Sub8_D1"
+  ))
+
+# Load the result dataset
+LAI2_hru <- result %>% map_dfr(4)
+
+# Define the best simulation number
+#best_sims_number_n <- 131  # Adjust this as necessary
+
+# Filter and prepare the Best_Sim dataset
+Best_Sim <- LAI2_hru %>%
+  filter(iter == best_sims_number_n) %>%
+  mutate(catch = case_when(
+    SUB == 3 ~ "sub3",
+    SUB == 4 ~ "sub4",
+    SUB == 6 ~ "sub6",
+    SUB == 7 ~ "sub7",
+    SUB == 8 ~ "sub8",
+    SUB == 9 ~ "sub9",
+    SUB == 10 ~ "sub10",
+    SUB == 11 ~ "sub11"
+  )) %>%
+  select(-c(SUB, Subbasin)) %>%
+  filter(catch %in% c("sub4", "sub8"))%>%
+  mutate(catch = case_when(
+    catch == "sub4" ~ "Sub4_D2",
+    catch == "sub8" ~ "Sub8_D1"
+  ))
+
+# Prepare the LAI1 dataset
+LAI1 <- result_LAI %>%
+  group_by(catch, Date) %>%
+  mutate(
+    U95PPU = quantile(LAI.x, probs = 0.975, na.rm = TRUE),
+    L95PPU = quantile(LAI.x, probs = 0.025, na.rm = TRUE),
+    diff = U95PPU - L95PPU
+  ) %>%
+  ungroup() %>%
+  select(-SUB) %>%
+  filter(catch %in% c("sub4", "sub8"))%>%
+  mutate(catch = case_when(
+    catch == "sub4" ~ "Sub4_D2",
+    catch == "sub8" ~ "Sub8_D1"
+  ))
+
+
+# Combine predicted and observed data
+LAI_all_plot <- left_join(Best_Sim, LAI1) %>% 
+  drop_na(LAI, LAI.y, Date) %>%  # Remove rows with NA value
+  mutate(HRU = as.factor(HRU))
+# Create the plot
+LAI1_plot2plot <- ggplot(data = LAI_all_plot) + 
+  geom_line(aes(x = Date, y = LAI, colour = HRU,alpha = 0.6), linewidth = 0.2, alpha = 0.4) +
+  geom_line(aes(x = Date, y = LAI.y, colour = "Observed"), linewidth = 0.6) +  # Observed data line
+  geom_point(data=LAI_Obs_Pinus_plot, aes(x = Date, y = LAI, shape = Site, color='red'), size=0.8) +  # Observed data line
+  geom_ribbon(aes(x = Date, ymin = L95PPU, ymax = U95PPU, alpha = 0.2), fill = "green", alpha = 0.1) + #colour = "95PPU"
+   theme_bw() +
+  facet_wrap(. ~ interaction( catch,LandUse), ncol = 2)+
+  #facet_wrap(. ~ catch, ncol = 2)+
+    theme(#legend.position = "bottom",   # Position the legend at the bottom
+        legend.text = element_text(size = 8),   # Adjust legend text size
+        legend.title = element_text(size = 10),  # Adjust legend title size
+        legend.key.size = unit(0.4, "cm"))+
+  theme(
+    text = element_text(size = 25),        # Global text size
+    axis.title = element_text(size = 20),  # Axis title text size
+    axis.text = element_text(size = 25),   # Axis text size
+    legend.title = element_text(size = 20), # Legend title text size
+    legend.text = element_text(size = 25),  # Legend items text size
+    strip.text = element_text(size = 20)   # Facet label text size
+  )+ geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black")
+
+
+
+LAI1_plot2plot <- ggplot(data = LAI_all_plot) + 
+  geom_line(aes(x = Date, y = LAI, colour = HRU,alpha = 0.6), linewidth = 0.2, alpha = 0.4) +
+  geom_line(aes(x = Date, y = LAI.y, colour = "Observed"), linewidth = 0.6) +  # Observed data line
+  #geom_point(data=LAI_Obs_Pinus_plot, aes(x = Date, y = LAI, shape = Site, color='red'), size=0.8) +  # Observed data line
+  geom_ribbon(aes(x = Date, ymin = L95PPU, ymax = U95PPU, alpha = 0.2), fill = "green", alpha = 0.1) + #colour = "95PPU"
+   theme_bw() +
+  facet_wrap(. ~ interaction( catch,LandUse), ncol = 2)+
+  #facet_wrap(. ~ catch, ncol = 2)+
+    theme(#legend.position = "bottom",   # Position the legend at the bottom
+        legend.text = element_text(size = 8),   # Adjust legend text size
+        legend.title = element_text(size = 10),  # Adjust legend title size
+        legend.key.size = unit(0.4, "cm"))+
+  theme(
+    text = element_text(size = 25),        # Global text size
+    axis.title = element_text(size = 20),  # Axis title text size
+    axis.text = element_text(size = 25),   # Axis text size
+    legend.title = element_text(size = 20), # Legend title text size
+    legend.text = element_text(size = 25),  # Legend items text size
+    strip.text = element_text(size = 20)   # Facet label text size
+  )+ geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black")
+
+
+# Display the plot
+print(LAI1_plot2plot)
+#S1_lai<-LAI1_plot1plot_PINE
+#S2_lai<-LAI1_plot1plot_PINE
+#S3_lai<-LAI1_plot1plot_PINE
+```
+
+
+
+
+```{r}
+## calculate D factor, then plot 95PPU and calculate r and p factor for LAI
+
+Best_Sim<-result_ET%>%
+  filter(iter==best_sims_number_n)%>%
+  filter(catch %in% c("Sub4.txt","Sub8.txt"))%>%
+  mutate(catch = case_when(
+    catch == "Sub4.txt" ~ "Sub4_D2",
+    catch == "Sub8.txt" ~ "Sub8_D1"
+  ))
+
+ET1<-result_ET  %>% ##Flow.x is observed 
+  group_by(catch,Date)%>%
+  mutate(# calculate 95PPU
+            U95PPU = quantile( ET.x ,probs=0.975,na.rm=T),
+            L95PPU= quantile( ET.x ,probs=0.025,na.rm=T),
+            diff=U95PPU - L95PPU)%>%
+  ungroup()%>%
+  filter(catch %in% c("Sub4.txt","Sub8.txt"))%>%
+  mutate(catch = case_when(
+    catch == "Sub4.txt" ~ "Sub4_D2",
+    catch == "Sub8.txt" ~ "Sub8_D1"
+  ))
+
+##extract number of simulated points, (number of rows in Date 
+one_run<-result_ET%>%
+  filter(catch == "Sub3.txt", iter == 1)  # Select one run for the calculation
+
+k <- 156
+
+# Compute d factor
+# Calculate the average distance (D-factor) between the upper and lower 95PPU
+# d_X = sum(flow1$diff, na.rm = TRUE) * (1 / k)
+
+# flow_y_std <- sd(flow1$Flow.y, na.rm = TRUE)
+# d_factor <- d_X / flow_y_std
+d_factor_ET<- ET1 %>%
+  group_by(catch) %>%
+  summarise(diff_=sum(diff,na.rm = TRUE),
+    k = k,  # Number of observed points
+    std_dev = sd(ET.x, na.rm = TRUE),
+    d_factor = (diff_ * (1 / k)) / std_dev
+  )
+
+
+##ET.x is predicted
+#The best outcome is that 100% of the measurements are bracketed by the 95PPU, and d is close to zero.
+
+ET1_plotplot<- ggplot() + geom_line(data= Best_Sim, aes(Date,ET.x, colour = "Best Simulation")) +
+  geom_line(data= ET1 ,aes(Date, ET.y, colour = "Observed")) +
+  geom_ribbon(data= ET1, aes(x=Date,ymin = L95PPU,ymax = U95PPU), 
+              fill = "green", alpha=0.5)+
+ # geom_ribbon(data= flow1 , aes(Date, L95PPU, colour = "95PPU"), alpha = 0.3) +
+  #geom_ribbon(data= flow1 , aes(Date, U95PPU, colour = "95PPU"), alpha = 0.3) +
+ # facet_wrap(~Stname, ncol =1, scales = "free" )  +
+  theme_bw() + 
+  scale_color_manual(name='Legend',
+                     breaks=c('Best Simulation','Observed', '95PPU'),
+                     values=c('Best Simulation'='red', 'Observed'='blue', '95PPU' = 'green'))+
+ # geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black") +
+  facet_wrap(. ~  catch, ncol = 3)+
+  labs(
+    x = "Date",  # Change to your desired label
+    y =  "ET (mm)"  # Change to your desired label
+  )+
+  theme(
+    text = element_text(size = 25),      
+    axis.title = element_text(size = 20),  
+    axis.text = element_text(size = 25),   
+    legend.title = element_text(size = 20), 
+    legend.text = element_text(size = 25), 
+    strip.text = element_text(size = 20)  
+  )+ geom_vline(xintercept = as.numeric(as.Date('2016-01-01')), linetype = "dashed", color = "black")
+
+
+```
+
+```{r}
+#library(cowplot)
+combined_plot <- plot_grid(
+  flow1_plotplot,    # The flow plot
+  LAI1_plot1plot,    # The LAI 95PPU plot
+  ET1_plotplot,
+  LAI1_plot2plot,# The HRU (Pine, Gras, Pasture) plot
+  labels = c("A", "B", "C","D"),    # Adding labels to each plot (optional)
+  ncol = 1,     # 1 column layout for stacked plots (can adjust for grid)
+  align = 'v'   # Align plots vertically
+)
+
+print(combined_plot )
+
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/combined_plot.png'), plot = combined_plot,width = 24, height = 24)
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/combined_plot2.png'), plot = combined_plot,width = 12, height = 10)
+
+
+combined_plot <- plot_grid(
+  flow1_plotplot,    # The flow plot
+  LAI1_plot1plot,    # The LAI 95PPU plot
+  ET1_plotplot,
+ # LAI1_plot2plot,# The HRU (Pine, Gras, Pasture) plot
+  labels = c("A", "B", "C"),    # Adding labels to each plot (optional)
+  ncol = 1,     # 1 column layout for stacked plots (can adjust for grid)
+  align = 'v'   # Align plots vertically
+)
+
+print(combined_plot )
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/combined_plot3.png'), plot = combined_plot,width = 40, height = 20)
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/combined_plot4.png'), plot = combined_plot,width = 12, height = 10)
+
+# 
+combined_plot_S <- plot_grid(
+  S1_lai,    # The flow plot
+  S2_lai,    # The LAI 95PPU plot
+  S3_lai,
+ # LAI1_plot2plot,# The HRU (Pine, Gras, Pasture) plot
+    labels = c("A", "B", "C"),    # Adding labels to each plot (optional)
+  ncol = 1,     # 1 column layout for stacked plots (can adjust for grid)
+  align = 'v' ,   # Align plots vertically
+label_size = 25  # Align plots vertically
+)
+
+print(combined_plot_S )
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/combined_plotLAID22.png'), plot = combined_plot_S,width = 20, height = 20)
+
+
+combined_plot_F <- plot_grid(
+  S1_flow,    # The flow plot
+  S2_flow,    # The LAI 95PPU plot
+  S3_flow,
+ # LAI1_plot2plot,# The HRU (Pine, Gras, Pasture) plot
+  labels = c("A", "C", "D"),    # Adding labels to each plot (optional)
+  ncol = 1,     # 1 column layout for stacked plots (can adjust for grid)
+  align = 'v',   # Align plots vertically
+label_size = 25)
+
+print(combined_plot_F )
+ggsave(paste0(directory,'/SUFI2.IN/',nombre_run,'/combined_plotflowD22.png'), plot = combined_plot_F,width = 20, height = 20)
+
+```
+
+#################################### new parameter constrains given SWAT manual  ##########################################
+```{r}
+
+## if no errors, rewrite par_inf using this file in directory,"/SUFI2.IN/"
+# CANMX is 2 replace line with v__CANMX.hru______PINE	2	2
+#Do automatic chech of min and max ranges in between o to 1 for
+# 2:v__ALPHA_BF.gw______PAST	,# 3:v__ALPHA_BF.gw______PINE
+# 7:v__ESCO.hru______PINE	 ,# 8:v__ESCO.hru______PAST	 ,# 9:v__ESCO.hru______GRAS	 ,
+# 19:v__EPCO.hru______PINE
+# 20:v__EPCO.hru______PAST
+# 26:v__DLAI{144}.plant.dat
+# 27:v__DLAI{12}.plant.dat
+# 33:v__OV_N.hru______GRAS
+# 36:v__LAIMX1{144}.plant.dat
+# 37:v__LAIMX2{144}.plant.dat
+# 38:v__FRGRW1{144}.plant.dat
+# 39:v__FRGRW2{144}.plant.dat
+# 40:v__LAIMX1{12}.plant.dat
+# 41:v__LAIMX2{12}.plant.dat
+# 42:v__FRGRW1{12}.plant.dat
+# 43:v__FRGRW2{12}.plant.dat
+#and v__GW_REVAP.gw should be between 0.02 and 0.20.
+
+
+
+# Define parameters for specific constraints
+params_to_check <- c(
+  "v__ALPHA_BF.gw______PINE", "v__ALPHA_BF.gw______PAST",
+  "v__ESCO.hru______PINE", "v__ESCO.hru______PAST",
+  "v__ESCO.hru______GRAS", "v__EPCO.hru______PINE",
+  "v__EPCO.hru______PAST", "v__DLAI\\{144\\}.plant.dat",
+  "v__DLAI\\{12\\}.plant.dat", "v__OV_N.hru______GRAS",  "v__GSI\\{12\\}.plant.dat",
+  "v__GSI\\{144\\}.plant.dat"
+)
+
+params_to_check2 <- c(
+  "v__GW_REVAP.gw"
+)
+
+params_to_check3 <- c(
+  "v__CANMX.hru______PINE"
+)
+
+
+params_to_check4 <- c(
+  "CN2.mgt"
+)
+
+params_to_check5 <- c(
+
+  "v__LAIMX1\\{144\\}.plant.dat", "v__LAIMX2\\{144\\}.plant.dat",
+  "v__FRGRW1\\{144\\}.plant.dat", "v__FRGRW2\\{144\\}.plant.dat",
+  "v__LAIMX1\\{12\\}.plant.dat", "v__LAIMX2\\{12\\}.plant.dat",
+  "v__FRGRW1\\{12\\}.plant.dat", "v__FRGRW2\\{12\\}.plant.dat"
+)
+
+# Apply constraints to the parameters based on partial matching
+new_parameter_data_with_ranges <-best_simulations_range %>%
+  mutate(
+   par_lower = case_when(
+      grepl(paste(params_to_check, collapse = "|"), Parameter_Name) ~ ifelse(par_lower < 0, 0.001, par_lower),
+      grepl(paste(params_to_check2, collapse = "|"), Parameter_Name) ~ ifelse(par_lower < 0.02, 0.02, par_lower),
+      grepl(paste(params_to_check3, collapse = "|"), Parameter_Name) ~ ifelse(par_lower != 2, 2, par_lower),
+      grepl(paste(params_to_check4, collapse = "|"), Parameter_Name) ~ ifelse(par_lower < -0.75, -0.75, par_lower),
+      grepl(paste(params_to_check5, collapse = "|"), Parameter_Name) ~ ifelse(par_lower < 0.01, 0.01, par_lower),
+      TRUE ~ par_lower
+    ),
+   par_upper = case_when(
+      grepl(paste(params_to_check, collapse = "|"), Parameter_Name) ~ ifelse(par_upper > 1, 1, par_upper),
+      grepl(paste(params_to_check2, collapse = "|"), Parameter_Name) ~ ifelse(par_upper > 0.20, 0.20, par_upper),
+      grepl(paste(params_to_check3, collapse = "|"), Parameter_Name) ~ ifelse(par_upper != 2, 2, par_upper),
+      grepl(paste(params_to_check4, collapse = "|"), Parameter_Name) ~ ifelse(par_upper > 0.75, 0.75, par_upper),
+      grepl(paste(params_to_check5, collapse = "|"), Parameter_Name) ~ ifelse(par_upper > 1, 1, par_upper),
+      TRUE ~ par_upper
+    )
+  )
+
+##select min and max
+new_parameter_data_towrite <- new_parameter_data_with_ranges %>%
+  select(Parameter_Name, par_lower, par_upper)%>%
+  mutate(
+     par_lower= round( par_lower, digits = 3),
+     par_upper =round( par_upper, digits = 3))%>%
+  #### each row eliminate 1: and so on for Parameter_Name
+  mutate(Parameter_Name = gsub("^[0-9]+:", "", Parameter_Name))
+
+# Wire a par_inf_file with first 3 rows from the original file adn paste new_parameter_data_towrite
+
+# Read the first 3 lines as header (without loading it into a dataframe)
+
+par_inf_file <- read_lines(paste0(directory,"/SUFI2.IN/","/par_inf.txt"), n_max = 2)
+
+# Convert the new parameter data to text lines
+new_parameter_lines <- apply(new_parameter_data_towrite, 1, function(row) paste(row, collapse = "\t"))
+
+# Combine header and new parameter lines
+combined_lines <- c(par_inf_file, new_parameter_lines, "//--------------Replaced --------------]")
+# Write the combined data to a new .txt file
+writeLines(combined_lines, paste0(directory,"/SUFI2.IN/",nombre_run,"/new_par_inf_file.txt"))
+
+## add lines to parinf file
+
+# Read the first 3 lines as header (without loading it into a dataframe)
+
+par_inf_file <- read_lines(paste0(directory,"/SUFI2.IN/","/par_inf.txt"), n_max = 2)
+
+# Convert the new parameter data to text lines
+new_parameter_lines <- apply(new_parameter_data_towrite, 1, function(row) paste(row, collapse = "\t"))
+
+# Combine header and new parameter lines
+combined_lines <- c(par_inf_file, new_parameter_lines, "//--------------Replaced --------------]")
+
+# Write the combined data to a new .txt file but keep the original file after them
+
+writeLines(combined_lines, paste0(directory,"/SUFI2.IN/",nombre_run,"/new_par_inf_file_nt.txt"))
+
+```
+
+```{r}
+# # Function to select either 'best' or 'median', calculate confidence intervals, and parameter bounds
+determine_newrange <- function(data, s_j, params_matrix, initial_ranges, t_critical, choice ) {
+  # Select either 'median' or 'best'
+  if (choice == "median") {
+    #browser()
+    # Calculate median values
+    selected_params <- data %>%
+     # select(-c(Sim_No., goal_value, "21:v__CANMX.hru______PINE", metric)) %>%
+      summarise(across(everything(), ~ median(.x, na.rm = TRUE))) %>%
+      pivot_longer(everything(), names_to = "Parameter", values_to = "Median")
+  } else if (choice == "best") {
+    # Select row with the maximum goal_value (best parameters)
+    selected_params <- data %>%
+      arrange(desc(goal_value)) %>%
+     # select(-c(Sim_No., goal_value, "21:v__CANMX.hru______PINE", metric)) %>%
+      slice(1) %>%
+      pivot_longer(everything(), names_to = "Parameter", values_to = "Median")
+  } else {
+    stop("Invalid choice: choose either 'median' or 'best'.")
+  }
+
+  #Compute confidence intervals
+  confidence_intervals <- selected_params %>%
+    mutate(
+      SD = s_j[match(Parameter, colnames(params_matrix))],  # Match standard deviations to parameters
+      CI_Lower = Median - t_critical * SD,
+      CI_Upper = Median + t_critical * SD
+    )
+
+
+  return(confidence_intervals )
+}
+
+
+#################################### NEW PARAMETER BOUNDS ##########################################
+# # Define the function to calculate parameter bounds
+calculate_param_bounds <- function(confidence_intervals, goal) { #best_simulations,  params_matrix
+
+  # Filter the dataset based on best simulations
+  prueba_goal_best_all <- goal# %>%
+    # filter(Sim_No. %in% best_simulations) %>%
+    # distinct(Sim_No., .keep_all = TRUE)
+
+  # Calculate b'_j min and b'_j max based on the formulas provided
+  confidence_intervals_final <- confidence_intervals %>%
+    rowwise() %>%
+    mutate(
+      param_name = Parameter,  # Identify parameter name for each row
+
+      # Get the min and max from the correct column in params_matrix
+      param_min = min(prueba_goal_best_all[[param_name]], na.rm = TRUE),
+      param_max = max(prueba_goal_best_all[[param_name]], na.rm = TRUE),
+
+      # Calculate b_j_min and b_j_max based on provided formulas
+      b_j_min = CI_Lower - max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2),
+      b_j_max = CI_Upper + max((CI_Lower - param_min) / 2, (param_max - CI_Upper) / 2)
+    ) %>%
+    ungroup() %>%
+    select(-param_name) %>%  # Remove param_name
+    #select(Parameter, b_j_min, b_j_max)  # Reorder columns
+
+  return(confidence_intervals_final)
+}
+
+```
+

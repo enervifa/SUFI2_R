@@ -1,0 +1,193 @@
+
+//Script used for ET data download and processing in GEE 
+// import the microcatchments as shp
+var  LCp = ee.FeatureCollection("projects/ee-eliananervif/assets/LCsubbasins/sub4"),
+  //   aet = ee.ImageCollection("MODIS/006/MOD16A2");
+   aet = ee.ImageCollection("MODIS/061/MOD16A2GF");
+
+// set location and zoom level
+Map.centerObject(LCp,6);
+
+// add the layers
+Map.addLayer( LCp ,false,"sub152");
+
+// Define period 
+var startdate = ee.Date.fromYMD(2001,1,1);
+var enddate = ee.Date.fromYMD(2021,3,31);
+
+
+// filter aet                       
+var aet_LCp  = aet.filterDate(startdate, enddate)
+                       .filterBounds(LCp)
+var ET_LCp = aet_LCp .select('ET');
+var PET_LCp = aet_LCp.select('PET');
+var ETQ_LCp = aet_LCp.select('ET_QC');
+
+// Predefine the chart titles.
+var title1 = {
+  title: 'PET over time - LCp',
+  hAxis: {title: 'Time'},
+  vAxis: {title: 'PET (kg/m^2/8day)'},
+};
+
+print(PET_LCp)
+
+// print the charts
+print(Chart.image.seriesByRegion(PET_LCp,
+                                 LCp,
+                                ee.Reducer.mean(),
+                                'PET',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title1));
+                                
+// Predefine the chart titles.
+var title2 = {
+  title: 'AET over time - LCp',
+  hAxis: {title: 'Time'},
+  vAxis: {title: 'AET (kg/m^2/8day)'},
+};
+
+print(ET_LCp)
+
+// print the charts
+print(Chart.image.seriesByRegion(ET_LCp,
+                                 LCp,
+                                ee.Reducer.mean(),
+                                'ET',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title2));
+                                
+
+// Predefine the chart titles.
+var title1 = {
+  title: 'ETQ_DT over time - LCp',
+  hAxis: {title: 'Time'},
+  vAxis: {title: 'ETQ_DT (kg/m^2/8day)'},
+};
+
+print(ETQ_LCp)
+
+// print the charts
+print(Chart.image.seriesByRegion(ETQ_LCp,
+                                 LCp,
+                                ee.Reducer.mean(),
+                                'ET_QC',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title1));
+                                
+                                
+                      
+// Apply reducer.mean to calculate weigthed average
+
+//Script used for LAI data download and processing in GEE 
+
+// import the microcatchments as shp
+var LC = ee.FeatureCollection("projects/ee-eliananervif/assets/LCsubbasins/sub3"),
+   //  LNEf = ee.FeatureCollection("users/jimealonsop/LNE_forestal"),
+  //   LNEp = ee.FeatureCollection("users/jimealonsop/LNE_pasturas"),
+    LAIyFpar = ee.ImageCollection('projects/verselab-398313/assets/HiQ_LAI/wgs_500m_8d');
+
+// set location and zoom level
+Map.centerObject(LC,6);
+
+// add the layers
+Map.addLayer(LC,false,"sub3LAI");
+
+// Define period 
+var startdate = ee.Date.fromYMD(2001,1,1);
+var enddate = ee.Date.fromYMD(2024,12,31);
+
+
+// filter LAI            
+var LAI_HIQLC = LAIyFpar.filterDate(startdate, enddate)
+                     .filterBounds(LC)
+                     .select('LAI');
+                     
+ var LAI_LC = LAIyFpar.filterDate(startdate, enddate)
+                     .filterBounds(LC)
+                     .select('Re_TSS_HiQ');
+
+var LAIQ_LC = LAIyFpar.filterDate(startdate, enddate)
+                     .filterBounds(LC)
+                     .select('Re_TSS_MOD');
+                     
+var LAISD_LC = LAIyFpar.filterDate(startdate, enddate)
+                     .filterBounds(LC)
+                     .select('LAI_Diff');
+
+var LAIQ = LAIyFpar.filterDate(startdate, enddate)
+                     .filterBounds(LC)
+                     .select('LAI_QC');
+                     
+// Predefine the chart titles.
+var title1 = {
+  title: 'LAI over time - LCPast',
+  hAxis: {title: 'Time'},
+  vAxis: {title: 'LAI'},
+};
+
+
+print(LAI_HIQLC)
+
+// print the charts
+print(Chart.image.seriesByRegion(LAI_HIQLC,
+                                 LC,
+                                ee.Reducer.mean(),
+                                'LAI',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title1));
+                                
+
+
+print(LAI_LC)
+
+// print the charts
+print(Chart.image.seriesByRegion(LAI_LC,
+                                 LC,
+                                ee.Reducer.mean(),
+                                'Re_TSS_HiQ',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title1));
+                                
+
+
+print(LAIQ_LC)
+
+// print the charts
+print(Chart.image.seriesByRegion(LAIQ_LC,
+                                 LC,
+                                ee.Reducer.mean(),
+                                'Re_TSS_MOD',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title1));
+
+
+print(LAISD_LC)
+
+// print the charts
+print(Chart.image.seriesByRegion(LAISD_LC,
+                                 LC,
+                                ee.Reducer.mean(),
+                                'LAI_Diff',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title1));
+
+print(LAIQ)
+
+// print the charts
+print(Chart.image.seriesByRegion(LAIQ,
+                                 LC,
+                                ee.Reducer.mean(),
+                                'LAI_QC',
+                                500,
+                                'system:time_start',
+                                'PROJECT').setOptions(title1));
+                                
+                                
